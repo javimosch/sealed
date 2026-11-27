@@ -44,6 +44,10 @@ $ sealed exec --env API_KEY=demo/api-key -- sh -c 'echo "key=$API_KEY"'
 $ sealed exec --env API_KEY=demo/api-key -- sh -c 'printf %s "$API_KEY" | rev'
 <span class="w">0987654321-yek-ekaf</span></pre>
 
+<h2>Ask for a secret without pasting it into chat</h2>
+<pre>$ sealed request github/token --reason "to open pull requests"</pre>
+<p>The agent runs it. A desktop window says <strong>“Enter value for secret github/token”</strong>, you paste the value, and the agent only learns that it was stored. New secrets only; it never asks for your passphrase. It keeps the value out of the chat, <strong>not out of the agent’s reach</strong>: the same token can use it. Needs a desktop with GTK 3; the window (about 100 lines of Python) has a “Show what I type” checkbox, off by default.</p>
+
 <h2>What it helps with</h2>
 <ul>
 <li>Keeping keys out of chat transcripts, command arguments, shell history and logs.</li>
@@ -58,13 +62,13 @@ $ sealed exec --env API_KEY=demo/api-key -- sh -c 'printf %s "$API_KEY" | rev'
 
 <h2>What it shows about machin</h2>
 <ul class="stats">
-<li><b>~1,500</b>lines of MFL</li>
-<li><b>~350</b>lines of C</li>
-<li><b>~200 kB</b>stripped binary</li>
+<li><b>~1,600</b>lines of MFL</li>
+<li><b>~400</b>lines of C</li>
+<li><b>~220 kB</b>stripped binary</li>
 <li><b>&lt; 3 s</b>build, on the development machine</li>
 </ul>
 <p>One program is both the command-line tool and the daemon. machin's built-ins provide Argon2id, AES-256-GCM, HKDF, HMAC, SQLite, sockets, an HTTP client and JSON. The binary links dynamically to glibc, OpenSSL and SQLite.</p>
-<p><strong>Not everything is MFL.</strong> Hidden terminal input, running commands, redaction, temporary files, locked memory and process hardening are in <a href="https://github.com/javimosch/sealed/blob/main/src/shim.h">a C shim</a>. It is the most security-sensitive code, so review it first.</p>
+<p><strong>Not everything is MFL.</strong> Hidden terminal input, running commands, redaction, the desktop dialog, temporary files, locked memory and process hardening are in <a href="https://github.com/javimosch/sealed/blob/main/src/shim.h">a C shim</a>. It is the most security-sensitive code, so review it first.</p>
 
 <h2>Try it with a fake secret</h2>
 <p>Linux x86_64, with <a href="https://github.com/javimosch/machin">machin</a>, a C compiler, and the SQLite and OpenSSL 3 development packages.</p>

@@ -16,6 +16,7 @@
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
+#include <sys/file.h>
 
 static char* sh_dup(const char* s) { char* d = strdup(s ? s : ""); if (!d) abort(); return d; }
 
@@ -119,6 +120,65 @@ static char* sh_tty_value(const char* prompt) {
 }
 static long long sh_tty_value_status(void) { return sh_line_rc; }
 static long long sh_stdin_is_tty(void) { return isatty(0); }
+
+/* ---- desktop dialog (dialog.py, run by the system python; no shell).
+ * status: 0 entered, 1 cancelled or timed out, 3 could not run, 4 too long or
+ * multi-line. SEALED_DIALOG replaces the program (used by the tests); like the
+ * environment in general, it is controlled by whoever runs sealed. */
+#include "dialog_py.h"
+static int sh_dialog_rc = 3;
+static char* sh_dialog(const char* title, const char* heading, const char* body, long long confirm) {
+    static char buf[65536 + 2];
+    sh_dialog_rc = 3;
+    const char* other = getenv("SEALED_DIALOG");
+    char* av[10]; int n = 0;
+    if (other && *other) av[n++] = (char*)other;
+    else { av[n++] = "/usr/bin/python3"; av[n++] = "-I"; av[n++] = "-c"; av[n++] = (char*)sh_dialog_py; }
+    av[n++] = (char*)title; av[n++] = (char*)heading; av[n++] = (char*)body;
+    av[n++] = confirm ? "1" : "0";
+    av[n] = 0;
+    int p[2];
+    if (pipe(p)) return sh_dup("");
+    pid_t pid = fork();
+    if (pid < 0) { close(p[0]); close(p[1]); return sh_dup(""); }
+    if (pid == 0) {
+        int nul = open("/dev/null", O_RDWR);
+        dup2(nul, 0); dup2(p[1], 1); dup2(nul, 2);
+        close(p[0]); close(p[1]);
+        unsetenv("SEALED_TOKEN"); unsetenv("SEALED_TOKEN_FILE");
+        execv(av[0], av);
+        _exit(127);
+    }
+    close(p[1]);
+    size_t len = 0; ssize_t r; int too_long = 0; char sink[4096];
+    for (;;) {
+        if (len < sizeof buf - 1) r = read(p[0], buf + len, sizeof buf - 1 - len);
+        else { r = read(p[0], sink, sizeof sink); if (r > 0) too_long = 1; }
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) break;
+        if (!too_long) len += (size_t)r;
+    }
+    close(p[0]);
+    int st = 0;
+    while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+    buf[len] = 0;
+    int code = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+    if (code == 0) sh_dialog_rc = (too_long || len > 65535 || memchr(buf, '\n', len) || memchr(buf, 0, len)) ? 4 : 0;
+    else if (code == 1) sh_dialog_rc = 1;
+    else if (code == 4) sh_dialog_rc = 4;
+    char* out = sh_dup(sh_dialog_rc == 0 ? buf : "");
+    explicit_bzero(buf, sizeof buf);
+    return out;
+}
+static long long sh_dialog_status(void) { return sh_dialog_rc; }
+
+/* held until this process exits */
+static long long sh_lock(const char* path) {
+    int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) return -1;
+    if (flock(fd, LOCK_EX | LOCK_NB)) { close(fd); return -1; }
+    return 0;
+}
 
 /* ---- secret value from stdin: rejects NUL (it would silently truncate) ---- */
 #define SH_MAX_VALUE 65536

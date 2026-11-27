@@ -21,6 +21,9 @@ extern "sh" {
     fn sh_tty_value(string) string
     fn sh_tty_value_status() int
     fn sh_stdin_is_tty() int
+    fn sh_dialog(string, string, string, int) string
+    fn sh_dialog_status() int
+    fn sh_lock(string) int
     fn sh_stdin_status() int
     fn sh_write_private(string, string) int
     fn sh_private_dir(string) int

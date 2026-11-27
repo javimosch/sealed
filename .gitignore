@@ -1,5 +1,6 @@
 sealed
 sealed.mfl
+src/dialog_py.h
 *.db
 *.db-wal
 *.db-shm

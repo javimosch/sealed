@@ -2,7 +2,7 @@
 // goroutines, so no locks and no races; the arena frees each request's strings.
 // The master key lives only in the shim's locked buffer.
 
-type Req struct { token string  host string  name string  names []string  prefix string  value string  passphrase string  id string  kind string  scope string  rate int  purpose string  cmd string }
+type Req struct { token string  host string  name string  names []string  prefix string  value string  passphrase string  id string  kind string  scope string  rate int  purpose string  cmd string  new_only bool }
 
 type LsItem struct { name string  version int  last_used int  scopes []string }
 type LsOut struct { ok bool  token_scope string  secrets []LsItem }
@@ -106,6 +106,11 @@ func op_put(db, me, chain, q) (r) {
     if covered(chain, q.name) == false { r = scope_denied(db, me, q, q.name, "put")  return }
     cur, found := latest_secret(db, q.name)
     next := 1
+    if found && q.new_only {
+        audit(db, me.id, me.kind, q.host, q.name, "put", "conflict")
+        r = exists_reply(q.name)
+        return
+    }
     if found {
         next = cur.version + 1
         // overwriting: agents always need approval; humans need the passphrase
@@ -116,6 +121,19 @@ func op_put(db, me, chain, q) (r) {
     if secret_store(db, q.name, next, q.value) == false { r = fail_reply(110, "internal", "write failed", no_hints())  return }
     audit(db, me.id, me.kind, q.host, q.name, "put", "ok")
     r = ok_reply(json(PutOut{ok: true, name: q.name, version: next}))
+}
+
+func exists_reply(name) (r) { r = fail_reply(95, "conflict", name + " already exists; request only creates new secrets", []string{"to use it: sealed exec --env NAME=" + name + " -- <cmd>", "to replace it, ask human to run: sealed put " + name}) }
+
+// checked BEFORE a dialog is opened, so a human is never asked to type a value
+// that would then be refused
+func op_request_check(db, me, chain, q) (r) {
+    if name_chars_ok(q.name) == false { r = fail_reply(82, "validation", "bad secret name (allowed: A-Z a-z 0-9 . _ - /)", no_hints())  return }
+    if covered(chain, q.name) == false { r = scope_denied(db, me, q, q.name, "request")  return }
+    _, found := latest_secret(db, q.name)
+    if found { r = exists_reply(q.name)  return }
+    audit(db, me.id, me.kind, q.host, q.name, "request", "asked")
+    r = ok_reply("{\"ok\":true}")
 }
 
 // resolve hands plaintext to the sealed client, which injects it into a child
@@ -326,6 +344,7 @@ func dispatch_op(db, op, q, local) (r) {
     }
     if op == "ls" { r = op_ls(db, me, chain, q)  return }
     if op == "put" { r = op_put(db, me, chain, q)  return }
+    if op == "request_check" { r = op_request_check(db, me, chain, q)  return }
     if op == "resolve" { r = op_resolve(db, me, chain, q)  return }
     if op == "reveal" { r = op_reveal(db, me, chain, q)  return }
     if op == "rm" { r = op_rm(db, me, chain, q)  return }

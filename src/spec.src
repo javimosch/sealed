@@ -5,11 +5,12 @@ func app_version() (v) { v = "0.1.0" }
 func help_json() (s) {
     s = "{\"version\":" + json(app_version()) + ",\"output\":\"json\",\"commands\":{" +
         "\"init\":{\"args\":[],\"auth\":false,\"human\":true}," +
-        "\"unlock\":{\"args\":[],\"auth\":false,\"human\":true}," +
+        "\"unlock\":{\"args\":[],\"flags\":[\"--dialog\"],\"auth\":false,\"human\":true}," +
         "\"lock\":{\"args\":[],\"auth\":true}," +
         "\"status\":{\"args\":[],\"auth\":false}," +
         "\"ls\":{\"args\":[\"[prefix]\"],\"auth\":true}," +
         "\"put\":{\"args\":[\"name\"],\"stdin\":\"value\",\"auth\":true}," +
+        "\"request\":{\"args\":[\"name\"],\"flags\":[\"--reason text\"],\"auth\":true,\"input\":\"human, desktop window\"}," +
         "\"exec\":{\"flags\":[\"--env NAME=path\",\"--file NAME=path\"],\"args\":[\"--\",\"cmd\"],\"auth\":true,\"output\":\"child passthrough, redacted\"}," +
         "\"render\":{\"args\":[\"template\"],\"flags\":[\"--out file\"],\"auth\":true}," +
         "\"get\":{\"args\":[\"name\"],\"flags\":[\"--reveal\"],\"auth\":true,\"human\":true}," +
@@ -24,7 +25,7 @@ func help_json() (s) {
         "\"update\":{\"flags\":[\"--check\",\"--force\"]}," +
         "\"install\":{\"flags\":[\"--prefix DIR\"]},\"uninstall\":{\"flags\":[\"--prefix DIR\"]}}," +
         "\"global_flags\":[\"--json\",\"--db FILE\",\"--host\",\"--port\",\"--no-interactive\"]," +
-        "\"exit_codes\":{\"0\":\"success\",\"3\":\"daemon status: stopped\",\"5\":\"update --check: update available\",\"80\":\"invalid_args\",\"82\":\"validation\",\"83\":\"forbidden_kind\",\"85\":\"approval_required\",\"86\":\"locked\",\"87\":\"forbidden_scope\",\"89\":\"bad_passphrase\",\"90\":\"not_authenticated or permission\",\"92\":\"not_found\",\"95\":\"conflict\",\"100\":\"daemon_unreachable or integration\",\"101\":\"rate_limited\",\"110\":\"internal\"}," +
+        "\"exit_codes\":{\"0\":\"success\",\"3\":\"daemon status: stopped\",\"5\":\"update --check: update available\",\"80\":\"invalid_args\",\"82\":\"validation\",\"83\":\"forbidden_kind\",\"85\":\"approval_required\",\"86\":\"locked\",\"87\":\"forbidden_scope\",\"89\":\"bad_passphrase\",\"90\":\"not_authenticated or permission\",\"92\":\"not_found\",\"93\":\"no_dialog\",\"95\":\"conflict\",\"100\":\"daemon_unreachable or integration\",\"101\":\"rate_limited\",\"110\":\"internal\"}," +
         "\"env\":[\"SEALED_TOKEN\",\"SEALED_TOKEN_FILE\",\"SEALED_HOME\",\"SEALED_DB\",\"SEALED_HOST\",\"SEALED_PORT\",\"SEALED_URL\",\"SEALED_ALLOW_PLAINTEXT\",\"SEALED_HOST_LABEL\",\"SEALED_SERVER\",\"FEEDBACK_RELAY\"]," +
         "\"see_also\":[\"sealed guide\"]}"
 }
@@ -45,17 +46,18 @@ func guide_body() (g) {
     concepts["approval"] = "single use, 10 minutes, bound to one exact operation; granted with the passphrase via `sealed approve <id>`"
     concepts["redaction"] = "exec replaces the value, its base64 and hex forms, and long lines of multi-line values with ***"
     commands := make(map[string]string)
-    commands["agent"] = "ls, exec, render, put (new names), rm (with approval), token create (narrower agent), audit (own entries)"
+    commands["agent"] = "ls, request (a human types a new value), exec, render, put (new names), rm (with approval), token create (narrower agent), audit (own entries)"
     commands["human"] = "init, unlock, approve, get --reveal, token create"
     commands["ops"] = "daemon start|stop|status, serve, status, lock, update, install, uninstall, feedback"
     g = GuideBody{sealed: "a secret store agents can use without having to read it",
         one_liner: "Encrypted secrets behind a local daemon: run commands with secrets injected and output redacted, with scopes, human approvals and an audit log.",
         model: model,
-        loop: []string{"sealed status (exit 86 on other commands means a human must run: sealed unlock)", "sealed ls", "sealed exec --env NAME=path -- cmd", "on exit 85, ask the human to run the suggested `sealed approve <id>`, then re-run the same command"},
+        loop: []string{"sealed status (if locked: on a desktop run sealed unlock --dialog when the human expects it, else ask them to run: sealed unlock)", "sealed ls", "missing a secret? sealed request path --reason \"why\" (never ask for the value in chat)", "sealed exec --env NAME=path -- cmd", "on exit 85, ask the human to run the suggested `sealed approve <id>`, then re-run the same command"},
         concepts: concepts,
         commands: commands,
         examples: []Example{Example{goal: "call an API with a key you never read", do: []string{"sealed exec --env API_KEY=svc/api-key -- ./call-api.sh"}},
             Example{goal: "give a tool a key file that is deleted afterwards", do: []string{"sealed exec --file KEY_FILE=svc/identity-key -- sh -c 'my-tool --identity \"$KEY_FILE\"'"}},
+            Example{goal: "agent: have the human enter a missing secret", do: []string{"sealed request github/token --reason \"to open pull requests\""}},
             Example{goal: "human: store a secret with hidden input", do: []string{"sealed put svc/api-key"}},
             Example{goal: "store a new secret from a script", do: []string{"printf %s \"$VALUE\" | sealed put svc/api-key"}},
             Example{goal: "mint a narrow agent token", do: []string{"sealed token create --kind agent --scope svc/ --rate 30"}}},
@@ -68,6 +70,9 @@ func guide_body() (g) {
             "--file paths are removed when the command ends; SIGKILL of sealed itself leaves them in $XDG_RUNTIME_DIR or /dev/shm",
             "the audit host column is self-reported by the client",
             "one writer only; replication and read-only failover are not implemented yet",
+            "request waits up to 3 minutes per window, creates new secrets only, and needs a desktop with GTK 3 (python3-gi); every window has a Show what I type checkbox, off by default; run it with a timeout of at least 10 minutes",
+            "request keeps the value out of chat, not out of reach: the same token can use it with exec, and \"stored\" does not prove a human typed it",
+            "unlock --dialog asks for the master password in a desktop window; any program can imitate such a window, so terminal unlock is the more careful choice",
             "no telemetry: nothing is sent unless you run feedback or configure update"},
         version: app_version(),
         see_also: []string{"sealed help-json", "sealed version"}}

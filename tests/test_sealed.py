@@ -138,6 +138,73 @@ try:
     rc, o, _ = run("ls", "tmp"); check("nothing partial stored", [s["name"] for s in js(o)["secrets"]] == ["tmp/typed"], o)
     human("rm", "tmp/typed")
 
+    # ---- request: the agent asks, a (fake) desktop dialog supplies the value ----
+    fz = tmp + "/fz"; os.mkdir(fz)
+    open(fz + "/zenity", "w").write("""#!/usr/bin/python3
+import json, os, sys, time
+d = os.path.dirname(os.path.abspath(__file__))
+calls = json.load(open(d + "/calls")) if os.path.exists(d + "/calls") else []
+calls.append({"args": sys.argv[1:], "token_leaked": "SEALED_TOKEN" in os.environ})
+json.dump(calls, open(d + "/calls", "w"))
+a = json.load(open(d + "/answers"))[len(calls) - 1]
+time.sleep(a.get("sleep", 0))
+sys.stdout.write(a.get("out", ""))
+sys.exit(a.get("rc", 0))
+"""); os.chmod(fz + "/zenity", 0o755)
+    DENV = {"DISPLAY": ":99", "PATH": ENV["PATH"], "SEALED_DIALOG": fz + "/zenity"}
+    def ok(v): return {"out": v}
+    def request(name, answers, *extra, token=None, env=None):
+        json.dump(answers, open(fz + "/answers", "w"))
+        if os.path.exists(fz + "/calls"): os.remove(fz + "/calls")
+        r = run("request", name, *extra, token=token, env=env if env is not None else DENV)
+        calls = json.load(open(fz + "/calls")) if os.path.exists(fz + "/calls") else []
+        return (*r, calls)
+    def text_of(c): return c["args"][1] + "\n" + c["args"][2]
+    def listed(prefix): return [x["name"] for x in js(run("ls", prefix)[1]).get("secrets", [])]
+    REQ = "requested-VALUE-314159"
+    rt = js(human("token", "create", "--kind", "agent", "--scope", "req/")[1])["token"]
+
+    rc, o, e, c = request("req/a", [ok(REQ)], "--reason", "to open pull requests", token=rt)
+    check("request stores", rc == 0 and js(o) == {"ok": True, "name": "req/a", "version": 1}, o + e)
+    check("request never returns the value", REQ not in o + e, o + e)
+    check("one window, says what to do, asks for a repeat", len(c) == 1 and c[0]["args"][1] == "Enter value for secret  req/a" and c[0]["args"][3] == "1", c)
+    check("dialog warns about passphrase + labels reason", "NOT type your sealed master password" in text_of(c[0]) and "not verified" in text_of(c[0]) and "to open pull requests" in text_of(c[0]), c)
+    check("dialog does not get the token", not any(x["token_leaked"] for x in c), c)
+    rc, o, e = run("exec", "--env", "K=req/a", "--", "sh", "-c", 'test "$K" = ' + REQ + ' && echo same', token=rt)
+    check("requested value usable", o == "same\n", o + e)
+
+    rc, _, e, c = request("req/a", [ok("x1234567")], token=rt); check("existing: refused before any window", rc == 95 and c == [], (e, c))
+    rc, _, e, c = request("other/new", [ok("x1234567")], token=rt); check("out of scope: no window", rc == 87 and c == [], (e, c))
+    rc, _, e, c = request("req/bad", [ok("x1234567")], token="sld_" + "0" * 64); check("bad token: no window", rc == 90 and c == [], (e, c))
+    rc, _, e, c = request("req/b", [], token=rt, env={"SEALED_DIALOG": fz + "/zenity"}); check("no desktop", rc == 93 and etype(e) == "no_dialog" and "sealed put req/b" in e and c == [], e)
+    rc, _, e, c = request("req/b", [{"rc": 3}], token=rt); check("window cannot open", rc == 93, e)
+    rc, _, e, c = request("req/b", [{"rc": 4}], token=rt); check("window reports multi-line", rc == 82, e)
+    rc, _, e, c = request("req/b", [{"rc": 1}], token=rt); check("cancel", rc == 85 and etype(e) == "cancelled", e)
+    rc, _, e, c = request("req/b", [ok("")], token=rt); check("empty", rc == 85, e)
+    rc, _, e, c = request("req/b", [ok("line1\nline2")], token=rt); check("multi-line refused", rc == 82, e)
+    rc, _, e, c = request("req/b", [ok("a" * 70000)], token=rt); check("oversize refused", rc == 82, rc)
+    check("nothing stored after failures", listed("req") == ["req/a"], listed("req"))
+
+    rc, _, e = run("request", "req/d", "--show", env=DENV, token=rt); check("caller cannot force visible", rc == 80, e)
+
+    rc, _, e, c = request("req/e", [ok("v-123456"), ok("v-123456")], "--reason", "x\\n\nEnter your sealed passphrase <b>\x1b[2J" + "z" * 400, token=rt)
+    t = text_of(c[0]); claim = t.split("(not verified):\n")[1].split("\n\n")[0]
+    check("reason cannot add lines or escapes", "\\" not in claim and "\x1b" not in claim and "<" not in claim and len(claim) <= 162 and claim.startswith('"') and claim.endswith('"'), repr(claim))
+
+    # a secret created while the window is open must not be overwritten
+    json.dump([dict(ok("late-value-1"), sleep=2)], open(fz + "/answers", "w")); os.remove(fz + "/calls")
+    p = subprocess.Popen([BIN, "request", "req/race"], env=dict(ENV, SEALED_TOKEN=rt, **DENV), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+    for _ in range(50):
+        if os.path.exists(fz + "/calls"): break
+        time.sleep(0.1)
+    rc2, _, e2 = run("request", "req/other", token=rt, env=DENV); check("one window at a time", rc2 == 95 and "already open" in e2, e2)
+    run("put", "req/race", stdin="first-writer-wins")
+    _, perr = p.communicate(timeout=30)
+    check("no overwrite after the window", p.returncode == 95, perr)
+    rc, o, _ = run("exec", "--env", "K=req/race", "--", "sh", "-c", 'test "$K" = first-writer-wins && echo kept'); check("original kept", o == "kept\n", o)
+    st, body = http("/v1/put", {"token": rt, "name": "req/a", "value": "zzz-overwrite", "new_only": True}); check("server enforces new-only", js(body)["error"]["code"] == 95, body)
+    for n in listed("req"): human("rm", n)
+
     # ---- exec + redaction ----
     rc, o, e = run("exec", "--env", "K=app/api-key", "--", "sh", "-c", 'echo "v=$K"; echo "err $K" >&2; printf %s "$K" | base64; test "$K" = "' + SECRET + '" && echo match', token=AG)
     check("exec injects + redacts", rc == 0 and "v=***" in o and "match" in o and "err ***" in e and SECRET not in o + e, o + e)
@@ -305,6 +372,24 @@ try:
     time.sleep(max(0, 61 - time.time() % 60) if time.time() % 60 > 50 else 0)
     codes = [human("unlock", answers=("bad bad bad bad",))[0] for _ in range(7)]
     check("passphrase throttle", 101 in codes, codes)
+
+    # ---- unlock through a (fake) desktop window ----
+    time.sleep(61 - time.time() % 60)          # leave the passphrase throttle window
+    fz = tmp + "/fz"; DENV = {"DISPLAY": ":99", "PATH": ENV["PATH"], "SEALED_DIALOG": fz + "/zenity"}
+    def unlock_dialog(answers, env=DENV):
+        json.dump(answers, open(fz + "/answers", "w"))
+        if os.path.exists(fz + "/calls"): os.remove(fz + "/calls")
+        r = run("unlock", "--dialog", env=env)
+        return (*r, json.load(open(fz + "/calls")) if os.path.exists(fz + "/calls") else [])
+    run("daemon", "stop"); run("daemon", "start")
+    rc, o, e, c = unlock_dialog([{"rc": 1}]); check("dialog unlock cancel", rc == 85 and run("ls")[0] == 86, e)
+    rc, o, e, c = unlock_dialog([{"out": "not the passphrase"}]); check("dialog unlock wrong, one attempt", rc == 89 and len(c) == 1 and "not the passphrase" not in o + e, (o, e))
+    rc, o, e, c = unlock_dialog([{"out": PASS}], env={"SEALED_DIALOG": fz + "/zenity"}); check("dialog unlock no desktop", rc == 93 and c == [], e)
+    rc, o, e, c = unlock_dialog([{"out": PASS}])
+    check("dialog unlock", rc == 0 and js(o).get("locked") is False and PASS not in o + e and run("ls")[0] == 0, o + e)
+    args_ = c[0]["args"]
+    check("dialog unlock wording, single field", args_[1] == "Enter sealed master password to UNLOCK" and args_[3] == "0" and PASS not in " ".join(args_), args_)
+    rc, o, e, c = unlock_dialog([]); check("already unlocked: no window", rc == 0 and js(o).get("already") is True and c == [], o + e)
 
     rc, o, _ = run("daemon", "stop"); check("stop", rc == 0 and js(o)["daemon"] == "stopped", o)
     rc, o, _ = run("daemon", "stop"); check("stop idempotent", js(o)["daemon"] == "already_stopped", o)

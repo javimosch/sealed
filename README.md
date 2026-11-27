@@ -16,6 +16,47 @@ $ sealed exec --env API_KEY=demo/api-key -- sh -c 'printf %s "$API_KEY" | rev'
 0987654321-yek-ekaf          # <- the limit, in one line
 ```
 
+## Ask for a secret without pasting it into chat
+
+```sh
+sealed request github/token --reason "to open pull requests"
+```
+
+An agent runs this; a desktop window says **"Enter value for secret github/token"**,
+shows the reason (marked as unverified), and you paste the value. The agent only
+learns that it was stored. Every `sealed` window has a **"Show what I type"**
+checkbox, unchecked by default; only the person at the window can tick it.
+
+- creates **new** secrets only; the daemon enforces it, even if the name is created
+  while the window is open;
+- needs a token that covers the name, and checks everything before opening a window;
+- while hidden, the value must be repeated in a second field; when shown, it is
+  entered once;
+- never asks for your passphrase, and the window says not to type it;
+- one window at a time; cancel or 3 minutes without an answer stores nothing (give
+  the command a timeout of at least 10 minutes);
+- needs a desktop session with GTK 3 and `python3-gi`. Otherwise it exits 93 and suggests
+  `sealed put`. Multi-line values must come from a file.
+
+This keeps the value out of the chat, **not out of the agent's reach**: the same
+token can use it with `exec`. A program on your desktop can fake such a window or
+record your typing, so only enter values you expected to be asked for. "Stored"
+does not prove that a person typed the value.
+
+### Unlock from a desktop window
+
+`sealed unlock --dialog` opens a window headed **"Enter sealed master password to
+UNLOCK"**, so an agent can ask you to unlock. Input is hidden unless you tick the
+checkbox (anyone, or any program, that can see your screen can then read it). One
+attempt per window, and no window opens if it is already unlocked. `sealed` reads the
+window itself; the password is not in the command's output.
+
+**This is less careful than terminal unlock.** A program on your desktop can
+imitate the window (and the caller can replace it by setting `SEALED_DIALOG`) or
+record your typing. If you type your password into a
+window an agent opened, do not assume the agent cannot get it. Approvals and
+reveal have no dialog.
+
 ## What it does not protect against
 
 `exec` and `render` run where the caller is, so the daemon sends **plaintext to the
@@ -50,7 +91,8 @@ accidental changes. Root can do all of this and read the daemon's memory.
 
 Linux x86_64. Needs [machin](https://github.com/javimosch/machin) (tested with
 0.145.0), a C compiler, and the SQLite and OpenSSL 3 development packages. `curl`
-is needed for `update`.
+is needed for `update`. `request` and `unlock --dialog` need GTK 3 and
+`python3-gi` for `/usr/bin/python3`.
 
 ```sh
 ./scripts/demo.sh        # throwaway store, fake secret, includes the limit
@@ -104,8 +146,12 @@ The client refuses plain HTTP to a non-loopback daemon unless
 
 ## What this shows about machin
 
-One program is both the CLI and the daemon: **about 1,500 lines of MFL and 350
-lines of C**. It compiles to a stripped binary of about 200 kB, dynamically linked
+The optional desktop window is **not MFL**: it is about 100 lines of Python/GTK
+([`src/dialog.py`](src/dialog.py)), embedded in the binary and run by the system
+Python.
+
+One program is both the CLI and the daemon: **about 1,600 lines of MFL and 400
+lines of C**. It compiles to a stripped binary of about 220 kB, dynamically linked
 to glibc, OpenSSL and SQLite, in under 3 seconds on the development machine.
 
 **From machin's built-ins:** Argon2id, AES-256-GCM, HKDF, HMAC, secure random
@@ -114,7 +160,8 @@ daemon request's memory. The daemon has its own small HTTP server and handles on
 request at a time, so it shares no state between goroutines.
 
 **In C through the FFI** ([`src/shim.h`](src/shim.h)): hidden terminal input,
-running a command without a shell, streaming redaction, private temporary files,
+running a command without a shell, streaming redaction, starting the desktop
+window, private temporary files,
 locked memory and process hardening. This is the most security-sensitive code, so
 review it first.
 
@@ -152,6 +199,7 @@ mainly a demonstration of machin.
 
 ```sh
 ./build.sh && python3 tests/test_sealed.py    # real daemon, real pseudo-terminal
+xvfb-run -a /usr/bin/python3 tests/test_dialog.py    # real GTK window
 ```
 
 MIT license. See [SECURITY.md](SECURITY.md) to report a vulnerability.

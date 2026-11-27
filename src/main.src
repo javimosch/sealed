@@ -1,7 +1,7 @@
 // main: argument parsing and dispatch.
 
 func flag_takes_value(a) (yes) {
-    yes = a == "--db" || a == "--host" || a == "--port" || a == "--kind" || a == "--scope" || a == "--rate" || a == "--out" || a == "--context" || a == "--prefix"
+    yes = a == "--db" || a == "--host" || a == "--port" || a == "--kind" || a == "--scope" || a == "--rate" || a == "--out" || a == "--context" || a == "--prefix" || a == "--reason"
 }
 
 func main() {
@@ -35,7 +35,7 @@ func main() {
         }
     }
     for _, f := range keys(flags) {
-        if f != "--json" && f != "--no-interactive" && f != "--yes" && f != "--reveal" && f != "--human" && f != "--check" && f != "--force" { usage_die("unknown flag " + f) }
+        if f != "--json" && f != "--no-interactive" && f != "--yes" && f != "--reveal" && f != "--dialog" && f != "--human" && f != "--check" && f != "--force" { usage_die("unknown flag " + f) }
     }
 
     dbp := values["--db"]
@@ -72,7 +72,10 @@ func main() {
     if verb == "serve" { cmd_serve(o)  return }
     if verb == "daemon" { cmd_daemon(o, arg1)  return }
     if verb == "init" { cmd_init(o)  return }
-    if verb == "unlock" { cmd_unlock(o)  return }
+    if verb == "unlock" {
+        if has(flags, "--dialog") { cmd_unlock_dialog(o) } else { cmd_unlock(o) }
+        return
+    }
     if verb == "status" { println(call_or_exit(o, "status", new_req()))  return }
     if verb == "lock" { println(call_or_exit(o, "lock", new_req()))  return }
     if verb == "ls" {
@@ -84,6 +87,11 @@ func main() {
     if verb == "put" {
         if len(pos) != 1 { usage_die("usage: sealed put <name>  (asks with hidden input, or reads stdin; never argv)") }
         cmd_put(o, arg1)
+        return
+    }
+    if verb == "request" {
+        if len(pos) != 1 { usage_die("usage: sealed request <name> [--reason \"why\"]  (a human types the value in a desktop window)") }
+        cmd_request(o, arg1, values["--reason"])
         return
     }
     if verb == "render" {

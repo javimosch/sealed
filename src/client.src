@@ -33,7 +33,7 @@ func client_host() (h) {
 }
 
 func new_req() (q) {
-    q = Req{token: load_token(), host: client_host(), name: "", names: []string{}, prefix: "", value: "", passphrase: "", id: "", kind: "", scope: "", rate: 0, purpose: "", cmd: ""}
+    q = Req{token: load_token(), host: client_host(), name: "", names: []string{}, prefix: "", value: "", passphrase: "", id: "", kind: "", scope: "", rate: 0, purpose: "", cmd: "", new_only: false}
 }
 
 // call returns the exit code carried by the body (0 on success).
@@ -83,6 +83,57 @@ func call_privileged(o, op, q, what) (body) {
     }
     if code != 0 { fail_with(code, resp) }
     body = resp
+}
+
+// The reason is written by the caller and shown to a human: one line of plain
+// ASCII, no backslashes (the dialog would expand them), bounded.
+func clean_reason(s) (out) {
+    allowed := " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,:;!?'()[]-_/@#+=&%*"
+    parts := []string{}
+    i := 0
+    while i < len(s) && i < 160 {
+        c := substr(s, i, i + 1)
+        if index(allowed, c) < 0 { c = " " }
+        parts = append(parts, c)
+        i = i + 1
+    }
+    out = trim(join(parts, ""))
+}
+
+func nothing_stored(name, why) {
+    die(85, "cancelled", why + "; nothing was stored", []string{"ask the human before trying again", "or ask human to run: sealed put " + name})
+}
+
+// dialog_value asks the human on the desktop. The window hides input unless the
+// human ticks "Show what I type"; while hidden it requires a matching repeat.
+func dialog_value(name, reason) (value) {
+    claim := ""
+    if reason != "" { claim = "Reason given by the requester (not verified):\n\"" + reason + "\"\n\n" }
+    note := "This creates a NEW secret. Do NOT type your sealed master password here.\nIf you did not expect this window, press Cancel."
+    value = "" + sh_dialog("sealed: enter a value", "Enter value for secret  " + name, claim + note, 1)
+    st := sh_dialog_status()
+    if st == 3 { die(93, "no_dialog", "cannot open the desktop window (needs GTK 3 and python3-gi)", []string{"ask human to run: sealed put " + name}) }
+    if st == 4 { die(82, "validation", "too long or multi-line; nothing was stored", []string{"ask human to run: sealed put " + name + " < file"}) }
+    if st != 0 { nothing_stored(name, "cancelled or timed out") }
+    if value == "" { nothing_stored(name, "empty value") }
+    if has_prefix(value, "-----BEGIN") { die(82, "validation", "multi-line key material; nothing was stored", []string{"ask human to run: sealed put " + name + " < file"}) }
+}
+
+// request: the caller chooses the name, the human types the value on the
+// desktop, and the caller learns only that it was stored.
+func cmd_request(o, name, reason) {
+    if name_chars_ok(name) == false { die(82, "validation", "bad secret name (allowed: A-Z a-z 0-9 . _ - /)", []string{}) }
+    require_desktop(o, "ask human to run: sealed put " + name)
+    q := new_req()
+    q.name = name
+    call_or_exit(o, "request_check", q)
+    value := dialog_value(name, clean_reason(reason))
+    if valid_utf8(value) == false { die(82, "validation", "value is not valid UTF-8", []string{}) }
+    p := new_req()
+    p.name = name
+    p.value = value
+    p.new_only = true
+    println(call_or_exit(o, "put", p))
 }
 
 // split "NAME=path"
@@ -307,8 +358,31 @@ func cmd_init(o) {
     println("{\"ok\":true,\"db\":" + json(o.db) + ",\"token_id\":" + json(id) + ",\"token_file\":" + json(tf) + ",\"next\":\"sealed daemon start && sealed unlock\"}")
 }
 
+// one sealed window at a time, whatever it asks for
+func require_desktop(o, fallback) {
+    if o.interactive == false { die(85, "approval_required", "a dialog needs a human and --no-interactive was given", []string{fallback}) }
+    if env("DISPLAY") == "" && env("WAYLAND_DISPLAY") == "" { die(93, "no_dialog", "no desktop session (DISPLAY and WAYLAND_DISPLAY are unset)", []string{fallback}) }
+    ensure_home()
+    if sh_lock(home_dir() + "/request.lock") != 0 { die(95, "conflict", "another sealed window is already open", []string{"wait for the human to answer it"}) }
+}
+
+// unlock through a desktop window, so an agent can ask for it. Always hidden,
+// one attempt, and nothing is asked if the daemon is already unlocked.
+func cmd_unlock_dialog(o) {
+    fallback := "ask human to run in a terminal: sealed unlock"
+    require_desktop(o, fallback)
+    state := call_or_exit(o, "status", new_req())
+    if contains(state, "\"locked\":false") { println("{\"ok\":true,\"locked\":false,\"already\":true}")  return }
+    q := new_req()
+    q.passphrase = "" + sh_dialog("sealed: unlock", "Enter sealed master password to UNLOCK", "Daemon: " + clean_reason(base_url(o)) + "\nUnlocking lets every valid token use its secrets until you lock or restart.\nIf you did not expect this window, press Cancel.", 0)
+    st := sh_dialog_status()
+    if st == 3 { die(93, "no_dialog", "cannot open the desktop window (needs GTK 3 and python3-gi)", []string{fallback}) }
+    if st != 0 || q.passphrase == "" { die(85, "cancelled", "cancelled, timed out or empty; still locked", []string{fallback}) }
+    println(call_or_exit(o, "unlock", q))
+}
+
 func cmd_unlock(o) {
-    if can_prompt(o) == false { die(85, "approval_required", "unlock needs a human at a terminal", []string{"ask human to run: sealed unlock"}) }
+    if can_prompt(o) == false { die(85, "approval_required", "unlock needs a human at a terminal", []string{"ask human to run: sealed unlock", "or, on a desktop: sealed unlock --dialog"}) }
     q := new_req()
     q.passphrase = ask_passphrase("sealed passphrase: ")
     println(call_or_exit(o, "unlock", q))
