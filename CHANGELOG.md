@@ -1,0 +1,29 @@
+# Changelog
+
+`sealed` is experimental, has had no independent security audit, and does not stop
+an agent that is deliberately trying to get a secret.
+
+## 0.2.0 — 2026-11-27
+
+### Added
+- `sealed request <name> [--reason ...]`: an agent asks, and a person types a new
+  secret in a desktop window. It creates new secrets only.
+- `sealed unlock --dialog`: unlock from a desktop window. This is less careful than
+  terminal unlock, because a window can be imitated.
+- A "Show what I type" checkbox on every window, off by default. The windows need
+  GTK 3 and `python3-gi`.
+- Exit code 93 (`no_dialog`).
+
+### Fixed
+- `guide` now warns that without `SEALED_TOKEN` or `SEALED_TOKEN_FILE`, the
+  all-access token in `~/.sealed/token` is used. It also covers token setup, a
+  stopped daemon, and the limits of feedback masking.
+- `help-json` lists `SEALED_DIALOG`.
+
+### Upgrading
+Rebuild, then restart the daemon and unlock it again. The store format is
+unchanged.
+
+## 0.1.0 — 2026-11-27
+
+First public version (commit `923b744`, not tagged).

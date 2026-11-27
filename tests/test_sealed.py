@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """End-to-end tests: the real binary, a real daemon, a real pty for prompts."""
-import json, os, pty, select, shutil, socket, sqlite3, stat, subprocess, sys, tempfile, time, glob, urllib.request, urllib.error
+import re, json, os, pty, select, shutil, socket, sqlite3, stat, subprocess, sys, tempfile, time, glob, urllib.request, urllib.error
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN = os.path.join(ROOT, "sealed")
@@ -78,6 +78,12 @@ try:
     # ---- spec surface, no daemon ----
     rc, o, _ = run("help-json"); check("help-json", rc == 0 and "exec" in js(o).get("commands", {}), o)
     rc, o, _ = run("guide"); check("guide", rc == 0 and js(o)["guide"]["loop"], o)
+    gt = run("guide")[1]; hj = js(run("help-json")[1])
+    verbs = set(re.findall(r'verb == "([a-z][a-z-]*)"', open(ROOT + "/src/main.src").read())) - {"help"}
+    check("every command is in help-json and guide", not [v for v in verbs if v not in hj["commands"] or not re.search(r"\b%s\b" % v, gt)], sorted(verbs))
+    envs = set(re.findall(r'env\("(SEALED_[A-Z_]+|FEEDBACK_RELAY)"\)|getenv\("(SEALED_[A-Z_]+)"\)', "".join(open(f).read() for f in glob.glob(ROOT + "/src/*.src") + [ROOT + "/src/shim.h"])))
+    check("every env var is in help-json", not [a or b for a, b in envs if (a or b) not in hj["env"]], envs)
+    check("guide warns about the token fallback", "WITHOUT SEALED_TOKEN" in gt and "~/.sealed/token" in gt)
     rc, o, _ = run("guide", "--human"); check("guide human", rc == 0 and o.startswith("# sealed"), o)
     rc, o, _ = run("version"); check("version", rc == 0 and len(js(o).get("build", "")) == 12, o)
     rc, o, e = run("nope"); check("unknown verb", rc == 80 and o == "" and etype(e) == "invalid_args", e)

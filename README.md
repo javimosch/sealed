@@ -34,7 +34,7 @@ checkbox, unchecked by default; only the person at the window can tick it.
   entered once;
 - never asks for your passphrase, and the window says not to type it;
 - one window at a time; cancel or 3 minutes without an answer stores nothing (give
-  the command a timeout of at least 10 minutes);
+  the command a timeout of at least 4 minutes);
 - needs a desktop session with GTK 3 and `python3-gi`. Otherwise it exits 93 and suggests
   `sealed put`. Multi-line values must come from a file.
 
