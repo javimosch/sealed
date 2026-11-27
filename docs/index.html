@@ -3,39 +3,83 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta property="og:type" content="website">
+<meta property="og:title" content="sealed: a secrets store built in machin">
+<meta property="og:description" content="Keeps secrets out of chat transcripts and shell history. Experimental: it does not stop a hostile agent.">
+<meta property="og:url" content="https://javimosch.github.io/sealed/">
+<meta property="og:image" content="https://javimosch.github.io/sealed/og.png">
+<meta name="twitter:card" content="summary_large_image">
 <title>sealed: a secrets store built in machin</title>
 <meta name="description" content="A small self-hosted secrets store with limited agent tokens, built in machin. Experimental: protects against accidental exposure, not a hostile agent.">
 <style>
-:root{--bg:#f6f4ef;--fg:#1b1d1c;--mut:#5b615e;--card:#fff;--line:#ddd8cc;--acc:#0f6b57;--warn:#9a3b12;--warnbg:#fbeee6;--term:#14181a;--termfg:#dbe4e0}
-@media (prefers-color-scheme:dark){:root{--bg:#101312;--fg:#e8ebe9;--mut:#9aa5a0;--card:#171c1a;--line:#2a3330;--acc:#5cc9ac;--warn:#f0a57e;--warnbg:#2a1b13;--term:#080a0a}}
+:root{--bg:#f6f4ef;--fg:#1b1d1c;--mut:#565c59;--card:#fffdf9;--line:#e0dacd;--acc:#0f6b57;--acchi:#0a5545;--onacc:#f6f4ef;--tint:#e6efe9;--warn:#9a3b12;--warnbg:#fbeee6;--term:#121719;--termfg:#dbe4e0;--mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace}
+@media (prefers-color-scheme:dark){:root{--bg:#0e1110;--fg:#e8ebe9;--mut:#9ca8a2;--card:#151a18;--line:#27302c;--acc:#5cc9ac;--acchi:#7fe0c3;--onacc:#06221b;--tint:#14231e;--warn:#f0a57e;--warnbg:#261912;--term:#070909}}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif}
-main{max-width:760px;margin:0 auto;padding:48px 16px 64px}
-h1{font:700 clamp(2.4rem,9vw,3.6rem)/1 ui-monospace,SFMono-Regular,Menlo,monospace;margin:0 0 12px;letter-spacing:-.03em}
-h2{font-size:1.25rem;margin:48px 0 12px}
-.lead{font-size:1.2rem;color:var(--mut);margin:0}
-a{color:var(--acc)}
-pre{background:var(--term);color:var(--termfg);padding:16px;border-radius:8px;overflow-x:auto;font:13.5px/1.7 ui-monospace,SFMono-Regular,Menlo,monospace}
-code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.92em}
-pre .c{color:#7f918a}pre .o{color:#7fe0c3}pre .w{color:#ffab84}
-.warn{border-left:4px solid var(--warn);background:var(--warnbg);padding:12px 16px;border-radius:0 8px 8px 0;margin:24px 0}
-.warn strong{color:var(--warn)}
-.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;padding:0;list-style:none}
-.stats li{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 16px;color:var(--mut);font-size:.9rem}
-.stats b{display:block;color:var(--fg);font-size:1.6rem;line-height:1.3}
-li{margin:4px 0}
-footer{margin-top:56px;border-top:1px solid var(--line);padding-top:16px;color:var(--mut);font-size:.9rem}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--fg);font:16.5px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
+.wrap{max-width:880px;margin:0 auto;padding:0 20px}
+a{color:var(--acc);text-underline-offset:3px}
+a:hover{color:var(--acchi)}
+a:focus-visible{outline:2px solid var(--acc);outline-offset:3px}
+nav{border-bottom:1px solid var(--line)}
+nav .wrap{display:flex;align-items:center;gap:20px;min-height:60px;flex-wrap:wrap}
+nav a{text-decoration:none;font-size:.93rem;color:var(--mut)}
+nav .brand{display:flex;align-items:center;gap:10px;margin-right:auto;color:var(--fg);font:700 1.05rem var(--mono)}
+header{display:grid;grid-template-columns:1fr auto;gap:40px;align-items:center;padding:64px 0 36px}
+header img{width:184px;height:184px;filter:drop-shadow(0 14px 22px rgb(0 0 0/.18))}
+h1{font:700 clamp(2.8rem,10vw,4.4rem)/1 var(--mono);margin:0 0 18px;letter-spacing:-.045em}
+h2{font-size:1.5rem;line-height:1.3;letter-spacing:-.015em;margin:0 0 14px;text-wrap:balance}
+h3{font-size:1rem;margin:0 0 6px}
+section{padding:48px 0;border-top:1px solid var(--line)}
+.lead{font-size:1.28rem;line-height:1.5;color:var(--mut);margin:0 0 26px;max-width:34ch;text-wrap:balance}
+.actions{display:flex;gap:12px;flex-wrap:wrap;margin:0}
+.btn{display:inline-block;padding:10px 18px;border-radius:8px;border:1px solid var(--acc);text-decoration:none;font-weight:600;font-size:.95rem}
+.btn.main{background:var(--acc);color:var(--onacc)}
+.btn.main:hover{background:var(--acchi);color:var(--onacc)}
+code{font-family:var(--mono);font-size:.9em;background:var(--tint);padding:1px 5px;border-radius:4px}
+pre{background:var(--term);color:var(--termfg);padding:18px 20px;border-radius:10px;overflow-x:auto;font:13.5px/1.75 var(--mono);margin:20px 0}
+pre code{background:none;padding:0}
+pre .c{color:#869992}pre .o{color:#7fe0c3}pre .w{color:#ffab84}
+.term{background:var(--term);border-radius:10px;margin:0 0 48px;box-shadow:0 18px 40px -24px rgb(0 0 0/.55);border:1px solid var(--line)}
+.term p{margin:0;padding:10px 20px;border-bottom:1px solid #ffffff14;color:#869992;font:12px var(--mono)}
+.term pre{margin:0;background:none}
+.warn{border:1px solid var(--warn);background:var(--warnbg);padding:14px 18px;border-radius:10px;margin:0 0 44px}
+.warn strong.t{color:var(--warn)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;padding:0;margin:20px 0 0;list-style:none}
+.grid li{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px;color:var(--mut);font-size:.95rem}
+.grid h3{color:var(--fg)}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:10px;overflow:hidden;padding:0;margin:20px 0;list-style:none}
+.stats li{background:var(--card);padding:16px 18px;color:var(--mut);font-size:.88rem}
+.stats b{display:block;color:var(--acc);font:700 1.55rem/1.4 var(--mono);white-space:nowrap}
+footer{border-top:1px solid var(--line);padding:28px 0 56px;color:var(--mut);font-size:.9rem}
+@media (min-width:860px){.grid{grid-template-columns:repeat(3,1fr)}.grid li:last-child{grid-column:span 2}}
+@media (max-width:640px){.term pre{white-space:pre-wrap;overflow-wrap:anywhere}header{grid-template-columns:1fr;padding-top:36px;gap:20px}header img{order:-1;width:112px;height:112px}.stats{grid-template-columns:repeat(2,1fr)}nav .opt{display:none}}
 </style>
 </head>
 <body>
-<main>
+<nav><div class="wrap">
+<a class="brand" href="./"><img src="favicon.svg" alt="" width="28" height="28">sealed</a>
+<a class="opt" href="#limits">Limits</a>
+<a class="opt" href="#machin">machin</a>
+<a href="#try">Try it</a>
+<a href="https://github.com/javimosch/sealed">GitHub</a>
+</div></nav>
+<main class="wrap">
+<header>
+<div>
 <h1>sealed</h1>
 <p class="lead">A small self-hosted secrets store with limited agent tokens, built in <a href="https://github.com/javimosch/machin">machin</a>.</p>
-<p><a href="https://github.com/javimosch/sealed">Source on GitHub</a></p>
+<p class="actions"><a class="btn main" href="#try">Try it with a fake secret</a><a class="btn" href="https://github.com/javimosch/sealed">Source on GitHub</a></p>
+</div>
+<img src="icon.svg" alt="sealed logo: a wax seal stamped with three asterisks" width="184" height="184">
+</header>
 
-<div class="warn"><strong>Experimental. No independent security audit. Not for production secrets.</strong><br>
+<div class="warn"><strong class="t">Experimental. No independent security audit. Not for production secrets.</strong><br>
 It helps agents use secrets without <em>accidentally</em> exposing them. It does <strong>not</strong> stop an agent that is deliberately trying to get them.</div>
 
+<div class="term"><p>what redaction does, and where it stops</p>
 <pre><span class="c"># the command gets the secret; recognised forms are hidden in its output</span>
 $ sealed exec --env API_KEY=demo/api-key -- sh -c 'echo "key=$API_KEY"'
 <span class="o">key=***</span>
@@ -43,23 +87,32 @@ $ sealed exec --env API_KEY=demo/api-key -- sh -c 'echo "key=$API_KEY"'
 <span class="c"># the limit, in one line: transform the value and it gets through</span>
 $ sealed exec --env API_KEY=demo/api-key -- sh -c 'printf %s "$API_KEY" | rev'
 <span class="w">0987654321-yek-ekaf</span></pre>
+</div>
 
+
+<section>
 <h2>Ask for a secret without pasting it into chat</h2>
 <pre>$ sealed request github/token --reason "to open pull requests"</pre>
 <p>The agent runs it. A desktop window says <strong>“Enter value for secret github/token”</strong>, you paste the value, and the agent only learns that it was stored. New secrets only; it never asks for your passphrase. It keeps the value out of the chat, <strong>not out of the agent’s reach</strong>: the same token can use it. Needs a desktop with GTK 3. The window has a “Show what I type” checkbox, off by default.</p>
+</section>
 
+<section>
 <h2>What it helps with</h2>
-<ul>
-<li>Keeping keys out of chat transcripts, command arguments, shell history and logs.</li>
-<li>Storing them encrypted instead of in <code>.env</code> files.</li>
-<li>Limiting a token to a group of secrets.</li>
-<li>Asking you before a secret is replaced or deleted through <code>sealed</code>.</li>
-<li>Recording which token used what.</li>
+<ul class="grid">
+<li><h3>Out of the transcript</h3>Keeping keys out of chat transcripts, command arguments, shell history and logs.</li>
+<li><h3>Not in .env files</h3>Storing them encrypted instead of in <code>.env</code> files.</li>
+<li><h3>Scoped tokens</h3>Limiting a token to a group of secrets.</li>
+<li><h3>Approvals</h3>Asking you before a secret is replaced or deleted through <code>sealed</code>.</li>
+<li><h3>Audit</h3>Recording which token used what.</li>
 </ul>
+</section>
 
+<section id="limits">
 <h2>What it does not protect against</h2>
 <p>A token holder can get any value its token covers: by transforming it in <code>exec</code>, with <code>render</code>, or by calling the daemon directly. An agent running as your user can also read <em>your</em> token, which covers every secret. Root can read the daemon's memory. <a href="https://github.com/javimosch/sealed#what-it-does-not-protect-against">All the limits</a>.</p>
+</section>
 
+<section id="machin">
 <h2>What it shows about machin</h2>
 <ul class="stats">
 <li><b>~1,700</b>lines of MFL</li>
@@ -70,14 +123,17 @@ $ sealed exec --env API_KEY=demo/api-key -- sh -c 'printf %s "$API_KEY" | rev'
 <p>One program is both the command-line tool and the daemon. machin's built-ins provide Argon2id, AES-256-GCM, HKDF, HMAC, SQLite, sockets, an HTTP client and JSON. The main binary links dynamically to glibc, OpenSSL and SQLite, not GTK.</p>
 <p><strong>The desktop window is MFL too:</strong> about 200 lines calling GTK 3 directly, with no C file. machin has no FFI callbacks yet, so the program checks the window’s state itself every 20 ms. What you type never becomes an MFL string.</p>
 <p><strong>The main program is not all MFL.</strong> Hidden terminal input, running commands, redaction, temporary files, locked memory and process hardening are in <a href="https://github.com/javimosch/sealed/blob/main/src/shim.h">a C shim</a>. It is the most security-sensitive code, so review it first.</p>
+</section>
 
+<section id="try">
 <h2>Try it with a fake secret</h2>
-<p>Linux x86_64, with <a href="https://github.com/javimosch/machin">machin</a>, (0.146.0 or later), a C compiler, and the SQLite and OpenSSL 3 development packages. The desktop windows also need the GTK 3 development files.</p>
+<p>Linux x86_64, with <a href="https://github.com/javimosch/machin">machin</a> (0.146.0 or later), a C compiler, and the SQLite and OpenSSL 3 development packages. The desktop windows also need the GTK 3 development files.</p>
 <pre>git clone https://github.com/javimosch/sealed
 cd sealed
 ./scripts/demo.sh   <span class="c"># throwaway store; you choose a throwaway passphrase</span></pre>
+</section>
 
-<footer>MIT license. No telemetry. This page loads no scripts or external resources. <a href="https://github.com/javimosch/sealed/blob/main/SECURITY.md">Report a vulnerability</a>.</footer>
+<footer>MIT license. No telemetry. This page loads no scripts or external resources. Part of <a href="https://intrane.fr">intrane</a>. <a href="https://github.com/javimosch/sealed/blob/main/SECURITY.md">Report a vulnerability</a>.</footer>
 </main>
 </body>
 </html>

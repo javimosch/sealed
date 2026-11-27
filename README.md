@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/icon.svg" width="112" height="112" alt="sealed logo: a wax seal stamped with three asterisks"></p>
+
 # sealed
 
 [Website](https://javimosch.github.io/sealed/)
