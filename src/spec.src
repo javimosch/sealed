@@ -1,0 +1,275 @@
+// spec: help-json, guide, feedback, update, install/uninstall, daemon.
+
+func app_version() (v) { v = "0.1.0" }
+
+func help_json() (s) {
+    s = "{\"version\":" + json(app_version()) + ",\"output\":\"json\",\"commands\":{" +
+        "\"init\":{\"args\":[],\"auth\":false,\"human\":true}," +
+        "\"unlock\":{\"args\":[],\"auth\":false,\"human\":true}," +
+        "\"lock\":{\"args\":[],\"auth\":true}," +
+        "\"status\":{\"args\":[],\"auth\":false}," +
+        "\"ls\":{\"args\":[\"[prefix]\"],\"auth\":true}," +
+        "\"put\":{\"args\":[\"name\"],\"stdin\":\"value\",\"auth\":true}," +
+        "\"exec\":{\"flags\":[\"--env NAME=path\",\"--file NAME=path\"],\"args\":[\"--\",\"cmd\"],\"auth\":true,\"output\":\"child passthrough, redacted\"}," +
+        "\"render\":{\"args\":[\"template\"],\"flags\":[\"--out file\"],\"auth\":true}," +
+        "\"get\":{\"args\":[\"name\"],\"flags\":[\"--reveal\"],\"auth\":true,\"human\":true}," +
+        "\"rm\":{\"args\":[\"name\"],\"auth\":true,\"approval\":true}," +
+        "\"token\":{\"args\":[\"create|ls|revoke\",\"[id]\"],\"flags\":[\"--kind human|agent\",\"--scope prefix\",\"--rate per-minute\"],\"auth\":true}," +
+        "\"approve\":{\"args\":[\"id\"],\"auth\":false,\"human\":true}," +
+        "\"audit\":{\"args\":[],\"auth\":true}," +
+        "\"serve\":{\"flags\":[\"--host (default 127.0.0.1)\",\"--port (default 8744)\"]}," +
+        "\"daemon\":{\"args\":[\"start|stop|status\"],\"flags\":[\"--host\",\"--port\"]}," +
+        "\"guide\":{\"flags\":[\"--human\"]},\"help-json\":{},\"version\":{}," +
+        "\"feedback\":{\"args\":[\"message\"],\"flags\":[\"--kind\",\"--context\"]}," +
+        "\"update\":{\"flags\":[\"--check\",\"--force\"]}," +
+        "\"install\":{\"flags\":[\"--prefix DIR\"]},\"uninstall\":{\"flags\":[\"--prefix DIR\"]}}," +
+        "\"global_flags\":[\"--json\",\"--db FILE\",\"--host\",\"--port\",\"--no-interactive\"]," +
+        "\"exit_codes\":{\"0\":\"success\",\"3\":\"daemon status: stopped\",\"5\":\"update --check: update available\",\"80\":\"invalid_args\",\"82\":\"validation\",\"83\":\"forbidden_kind\",\"85\":\"approval_required\",\"86\":\"locked\",\"87\":\"forbidden_scope\",\"89\":\"bad_passphrase\",\"90\":\"not_authenticated or permission\",\"92\":\"not_found\",\"95\":\"conflict\",\"100\":\"daemon_unreachable or integration\",\"101\":\"rate_limited\",\"110\":\"internal\"}," +
+        "\"env\":[\"SEALED_TOKEN\",\"SEALED_TOKEN_FILE\",\"SEALED_HOME\",\"SEALED_DB\",\"SEALED_HOST\",\"SEALED_PORT\",\"SEALED_URL\",\"SEALED_ALLOW_PLAINTEXT\",\"SEALED_HOST_LABEL\",\"SEALED_SERVER\",\"FEEDBACK_RELAY\"]," +
+        "\"see_also\":[\"sealed guide\"]}"
+}
+
+type Example struct { goal string  do []string }
+type GuideBody struct { sealed string  one_liner string  model map[string]string  loop []string  concepts map[string]string  commands map[string]string  examples []Example  gotchas []string  version string  see_also []string }
+type GuideEnv struct { result string  version string  guide GuideBody }
+
+func guide_body() (g) {
+    model := make(map[string]string)
+    model["binary"] = "one binary is both the CLI and the daemon"
+    model["daemon"] = "holds the master key in memory after `unlock`; starts LOCKED after every restart"
+    model["storage"] = "SQLite; each value has its own AES-256-GCM key, wrapped by a master key = Argon2id(passphrase)"
+    model["client"] = "exec and render receive plaintext from the daemon and inject it on the machine where they run"
+    concepts := make(map[string]string)
+    concepts["token"] = "human or agent, limited to a scope prefix and a per-minute rate; a child never exceeds its parent"
+    concepts["scope"] = "'app/' covers app/x; 'app' covers app and app/x, never apple; '*' covers all"
+    concepts["approval"] = "single use, 10 minutes, bound to one exact operation; granted with the passphrase via `sealed approve <id>`"
+    concepts["redaction"] = "exec replaces the value, its base64 and hex forms, and long lines of multi-line values with ***"
+    commands := make(map[string]string)
+    commands["agent"] = "ls, exec, render, put (new names), rm (with approval), token create (narrower agent), audit (own entries)"
+    commands["human"] = "init, unlock, approve, get --reveal, token create"
+    commands["ops"] = "daemon start|stop|status, serve, status, lock, update, install, uninstall, feedback"
+    g = GuideBody{sealed: "a secret store agents can use without having to read it",
+        one_liner: "Encrypted secrets behind a local daemon: run commands with secrets injected and output redacted, with scopes, human approvals and an audit log.",
+        model: model,
+        loop: []string{"sealed status (exit 86 on other commands means a human must run: sealed unlock)", "sealed ls", "sealed exec --env NAME=path -- cmd", "on exit 85, ask the human to run the suggested `sealed approve <id>`, then re-run the same command"},
+        concepts: concepts,
+        commands: commands,
+        examples: []Example{Example{goal: "call an API with a key you never read", do: []string{"sealed exec --env API_KEY=svc/api-key -- ./call-api.sh"}},
+            Example{goal: "give a tool a key file that is deleted afterwards", do: []string{"sealed exec --file KEY_FILE=svc/identity-key -- sh -c 'my-tool --identity \"$KEY_FILE\"'"}},
+            Example{goal: "human: store a secret with hidden input", do: []string{"sealed put svc/api-key"}},
+            Example{goal: "store a new secret from a script", do: []string{"printf %s \"$VALUE\" | sealed put svc/api-key"}},
+            Example{goal: "mint a narrow agent token", do: []string{"sealed token create --kind agent --scope svc/ --rate 30"}}},
+        gotchas: []string{
+            "SECURITY LIMIT: sealed prevents accidental disclosure. It is NOT a boundary against a hostile process running as your user: an agent token can obtain any in-scope value (render, exec with a command that transforms the value, or calling the daemon API directly). Scope tokens narrowly.",
+            "exec output is the child's output, not JSON; the exit status is the child's. sealed's own errors are JSON on stderr.",
+            "values are text: no NUL bytes, max 64 KiB. exec --env strips trailing newlines; --file writes the value verbatim.",
+            "values shorter than 4 bytes are not redacted",
+            "exec runs the command without a shell and without a controlling terminal; use `-- sh -c '...'` for shell syntax",
+            "--file paths are removed when the command ends; SIGKILL of sealed itself leaves them in $XDG_RUNTIME_DIR or /dev/shm",
+            "the audit host column is self-reported by the client",
+            "one writer only; replication and read-only failover are not implemented yet",
+            "no telemetry: nothing is sent unless you run feedback or configure update"},
+        version: app_version(),
+        see_also: []string{"sealed help-json", "sealed version"}}
+}
+
+func guide_json() (s) { s = json(GuideEnv{result: "success", version: "1.0", guide: guide_body()}) }
+
+func guide_human() (s) {
+    g := guide_body()
+    s = "# sealed " + g.version + "\n\n" + g.one_liner + "\n\n## Loop\n"
+    for _, l := range g.loop { s = s + "- " + l + "\n" }
+    s = s + "\n## Examples\n"
+    for _, e := range g.examples { s = s + "- " + e.goal + ": `" + join(e.do, " ; ") + "`\n" }
+    s = s + "\n## Gotchas\n"
+    for _, l := range g.gotchas { s = s + "- " + l + "\n" }
+}
+
+// ---- feedback (relay-only variant) ----
+// Names and values must never leave the machine. Values are never loaded here
+// (asking the daemon to search for them would be a guessing oracle). Instead:
+// every known name is masked, as is anything shaped like a path or a credential.
+func known_names(o) (names) {
+    names = []string{}
+    if sh_exists(o.db) == 1 {
+        db := sqlite_open(o.db)
+        rows := parse(sqlite_query(db, "SELECT DISTINCT name AS v FROM secrets"), []KV{})
+        for _, row := range rows { names = append(names, row.v) }
+        sqlite_close(db)
+    }
+    status, resp, err := http_request("POST", base_url(o) + "/v1/ls", []string{"Content-Type: application/json"}, json(new_req()))
+    if err == "" && status == 200 {
+        listed := parse(resp, LsOut{})
+        for _, item := range listed.secrets { names = append(names, item.name) }
+    }
+}
+
+func looks_sensitive(word) (yes) {
+    yes = contains(word, "/") || contains(word, "=") || contains(word, "sld_") || contains(word, "-----")
+    if len(word) >= 16 {
+        i := 0
+        while i < len(word) {
+            if index("0123456789_+.", substr(word, i, i + 1)) >= 0 { yes = true }
+            i = i + 1
+        }
+    }
+    if len(word) >= 24 { yes = true }
+}
+
+func scrub(text, names) (out) {
+    flat := replace(replace(replace(text, "\r", " "), "\n", " "), "\t", " ")
+    for _, n := range names {
+        if len(n) >= 3 { flat = replace(flat, n, "[redacted]") }
+    }
+    words := []string{}
+    for _, w := range split(flat, " ") {
+        if looks_sensitive(w) { words = append(words, "[redacted]") } else { words = append(words, w) }
+    }
+    out = join(words, " ")
+}
+
+type Feedback struct { id string  app string  version string  kind string  message string  context string  reporter string }
+type FeedbackData struct { id string  stored int  relayed int  sent_message string }
+type FeedbackOut struct { ok bool  data FeedbackData }
+
+func cmd_feedback(o, message, kind, context) {
+    if trim(message) == "" { usage_die("usage: sealed feedback \"<message>\"") }
+    names := known_names(o)
+    k := kind
+    if k != "bug" && k != "idea" && k != "praise" { k = "note" }
+    // reporter is fixed: a username is not needed to read a bug report
+    f := Feedback{id: to_hex(rand_bytes(16)), app: "sealed", version: app_version(), kind: k, message: scrub(message, names), context: scrub(context, names), reporter: "agent"}
+    relay := env("FEEDBACK_RELAY")
+    if relay == "" { relay = "https://feedback.intrane.fr" }
+    relayed := 0
+    if relay != "off" {
+        status, _, err := http_request("POST", relay + "/v1/feedback", []string{"Content-Type: application/json"}, json(f))
+        if err == "" && status == 200 { relayed = 1 }
+    }
+    println(json(FeedbackOut{ok: true, data: FeedbackData{id: f.id, stored: 0, relayed: relayed, sent_message: f.message}}))
+}
+
+// ---- self update ----
+type VersionInfo struct { ok bool  version string  download string  sha256 string }
+
+func self_sha() (h) { h = to_hex(sha256_bytes(read_file_bytes("" + sh_self_path()))) }
+
+func run_argv(argv) (code) {
+    for _, a := range argv { sh_arg(a) }
+    code = sh_run()
+}
+
+func cmd_update(check_only, force) {
+    server := env("SEALED_SERVER")
+    // no compiled-in default: whoever serves updates to a secret store owns it
+    if server == "" { die(100, "no_update_server", "no update server is configured", []string{"set SEALED_SERVER=https://<your release host>"}) }
+    if has_prefix(server, "https://") == false && has_prefix(server, "http://127.0.0.1:") == false { die(80, "invalid_args", "SEALED_SERVER must be https", []string{}) }
+    status, body, err := http_get(server + "/version")
+    if err != "" || status != 200 || json_valid(body) == false { die(100, "update_unreachable", "cannot read " + server + "/version", []string{}) }
+    info := parse(body, VersionInfo{})
+    mine := self_sha()
+    local := substr(mine, 0, 12)
+    if info.version == local && force == false { println("{\"ok\":true,\"updated\":false,\"version\":" + json(local) + "}")  return }
+    if check_only {
+        println("{\"ok\":true,\"update_available\":true,\"from\":" + json(local) + ",\"to\":" + json(info.version) + "}")
+        exit(5)
+    }
+    if len(info.sha256) != 64 || substr(info.sha256, 0, 12) != info.version { die(100, "update_rejected", "the server must publish a full sha256 matching its version", []string{}) }
+    url := info.download
+    if has_prefix(url, "/") { url = server + url }
+    if has_prefix(url, server + "/") == false { die(100, "update_rejected", "download URL leaves the update server", []string{}) }
+    target := "" + sh_self_path()
+    staged := target + ".new-" + to_hex(rand_bytes(4))
+    if run_argv([]string{"curl", "-fsS", "--max-time", "60", "-o", staged, url}) != 0 { remove(staged)  die(100, "update_rejected", "download failed", []string{}) }
+    if to_hex(sha256_bytes(read_file_bytes(staged))) != info.sha256 { remove(staged)  die(100, "update_rejected", "sha256 mismatch", []string{}) }
+    sh_chmod(staged, 448)
+    code, out, _ := exec("'" + replace(staged, "'", "'\\''") + "' version")
+    if code != 0 || contains(out, "\"version\"") == false { remove(staged)  die(100, "update_rejected", "the downloaded binary failed its smoke test", []string{}) }
+    sh_chmod(staged, 493)
+    if run_argv([]string{"cp", "-p", target, target + ".bak"}) != 0 { remove(staged)  die(100, "update_rejected", "cannot write the .bak", []string{}) }
+    if run_argv([]string{"mv", "-f", staged, target}) != 0 { remove(staged)  die(100, "update_rejected", "swap failed", []string{}) }
+    println("{\"ok\":true,\"updated\":true,\"from\":" + json(local) + ",\"to\":" + json(info.version) + "}")
+}
+
+func cmd_install(prefix, removing) {
+    dir := prefix
+    if dir == "" { dir = env("HOME") + "/.local/bin" }
+    dst := dir + "/sealed"
+    if removing {
+        if sh_exists(dst) == 0 { println("{\"ok\":true,\"removed\":false,\"path\":" + json(dst) + "}")  return }
+        if remove(dst) != 0 { die(90, "permission_denied", "cannot remove " + dst, []string{}) }
+        println("{\"ok\":true,\"removed\":true,\"path\":" + json(dst) + "}")
+        return
+    }
+    if run_argv([]string{"mkdir", "-p", dir}) != 0 || sh_install_self(dst) != 0 { die(90, "permission_denied", "cannot write " + dst, []string{"sealed install --prefix <writable dir>"}) }
+    println("{\"ok\":true,\"installed\":" + json(dst) + "}")
+}
+
+// ---- daemon lifecycle (cli-daemon-spec) ----
+type Health struct { ok bool  service string  pid int }
+
+func healthy(o) (yes) {
+    yes = false
+    status, body, err := http_get("http://" + dial_host(o.host) + ":" + str(o.port) + "/_health")
+    if err == "" && status == 200 && json_valid(body) {
+        h := parse(body, Health{})
+        yes = h.service == "sealed"
+    }
+}
+
+func dial_host(h) (d) {
+    d = h
+    if h == "0.0.0.0" { d = "127.0.0.1" }
+}
+
+func cmd_serve(o) {
+    ensure_home()
+    db, ok := db_open(o.db)
+    if ok == false { die(110, "internal", "cannot open database " + o.db, []string{}) }
+    if meta_get(db, "salt") == "" { die(92, "not_found", "not initialised: " + o.db, []string{"ask human to run: sealed init"}) }
+    token := ""
+    if is_loopback(o.host) == false {
+        token = to_hex(rand_bytes(32))
+        if sh_write_private(home_dir() + "/shutdown.token", token) != 0 { die(90, "permission_denied", "cannot write the shutdown token", []string{}) }
+        write(2, "[serve] WARNING: non-loopback bind is plain HTTP; use only over an encrypted network\n")
+    }
+    serve_forever(db, o.host, o.port, token)
+}
+
+func cmd_daemon(o, action) {
+    where := ",\"host\":" + json(o.host) + ",\"port\":" + str(o.port)
+    if action == "status" {
+        if healthy(o) { println("{\"ok\":true,\"daemon\":\"running\"" + where + "}")  return }
+        println("{\"ok\":true,\"daemon\":\"stopped\"}")
+        exit(3)
+    }
+    if action == "start" {
+        if healthy(o) { println("{\"ok\":true,\"daemon\":\"already_running\"" + where + "}")  return }
+        ensure_home()
+        log := home_dir() + "/serve.log"
+        for _, a := range []string{"" + sh_self_path(), "serve", "--host", o.host, "--port", str(o.port), "--db", o.db} { sh_arg(a) }
+        sh_spawn_detached(log)
+        i := 0
+        while i < 50 {
+            if healthy(o) { println("{\"ok\":true,\"daemon\":\"started\"" + where + ",\"log\":" + json(log) + "}")  return }
+            sleep(100)
+            i = i + 1
+        }
+        die(100, "start_failed", "daemon did not become healthy: " + trim(read_file(log)), []string{"sealed serve"})
+    }
+    if action == "stop" {
+        if healthy(o) == false { println("{\"ok\":true,\"daemon\":\"already_stopped\"}")  return }
+        headers := []string{}
+        tok := trim(read_file(home_dir() + "/shutdown.token"))
+        if is_loopback(o.host) == false && tok != "" { headers = append(headers, "Authorization: Bearer " + tok) }
+        status, body, err := http_request("POST", "http://" + dial_host(o.host) + ":" + str(o.port) + "/_shutdown", headers, "")
+        i := 0
+        while i < 50 {
+            if healthy(o) == false { println("{\"ok\":true,\"daemon\":\"stopped\"}")  return }
+            sleep(100)
+            i = i + 1
+        }
+        die(110, "stop_failed", "daemon is still answering", []string{})
+    }
+    usage_die("usage: sealed daemon start|stop|status")
+}

@@ -1,0 +1,5 @@
+sealed
+sealed.mfl
+*.db
+*.db-wal
+*.db-shm

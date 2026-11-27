@@ -1,0 +1,326 @@
+// client: flags, daemon calls, terminal prompts, and the exec/render commands.
+
+type Opts struct { db string  host string  port int  interactive bool }
+
+func home_dir() (d) {
+    d = env("SEALED_HOME")
+    if d == "" { d = env("HOME") + "/.sealed" }
+}
+
+func ensure_home() {
+    if sh_private_dir(home_dir()) != 0 { die(90, "not_authenticated", "cannot create private directory " + home_dir() + " (must be owned by you)", []string{}) }
+}
+
+func base_url(o) (u) {
+    u = env("SEALED_URL")
+    if u == "" { u = "http://" + o.host + ":" + str(o.port) }
+    // tokens and values travel in clear text: stay on loopback unless told otherwise
+    ok := has_prefix(u, "https://") || has_prefix(u, "http://127.0.0.1:") || has_prefix(u, "http://localhost:") || env("SEALED_ALLOW_PLAINTEXT") == "1"
+    if ok == false { die(80, "invalid_args", "refusing plain http to a non-loopback daemon", []string{"use an SSH tunnel, or set SEALED_ALLOW_PLAINTEXT=1 on an encrypted network"}) }
+}
+
+func load_token() (t) {
+    t = env("SEALED_TOKEN")
+    if t != "" { return }
+    f := env("SEALED_TOKEN_FILE")
+    if f == "" { f = home_dir() + "/token" }
+    t = trim(read_file(f))
+}
+
+func client_host() (h) {
+    h = env("SEALED_HOST_LABEL")
+    if h == "" { h = trim(read_file("/etc/hostname")) }
+}
+
+func new_req() (q) {
+    q = Req{token: load_token(), host: client_host(), name: "", names: []string{}, prefix: "", value: "", passphrase: "", id: "", kind: "", scope: "", rate: 0, purpose: "", cmd: ""}
+}
+
+// call returns the exit code carried by the body (0 on success).
+func call(o, op, q) (code, body) {
+    code = 0
+    status, resp, err := http_request("POST", base_url(o) + "/v1/" + op, []string{"Content-Type: application/json"}, json(q))
+    body = resp
+    if err != "" || json_valid(resp) == false {
+        die(100, "daemon_unreachable", "no sealed daemon at " + base_url(o), []string{"sealed daemon start", "then ask a human to run: sealed unlock"})
+    }
+    if status != 200 {
+        e := parse(resp, ErrEnv{})
+        code = e.error.code
+        if code == 0 { code = 110 }
+    }
+}
+
+func fail_with(code, body) {
+    write(2, body + "\n")
+    exit(code)
+}
+
+func call_or_exit(o, op, q) (body) {
+    code, resp := call(o, op, q)
+    if code != 0 { fail_with(code, resp) }
+    body = resp
+}
+
+func can_prompt(o) (yes) { yes = o.interactive && sh_has_tty() == 1 }
+
+func ask_passphrase(prompt) (p) { p = "" + sh_tty_secret(prompt) }
+
+// call_privileged: if the daemon says approval is required and this is a human
+// token at a terminal, ask for the passphrase and retry once.
+func call_privileged(o, op, q, what) (body) {
+    code, resp := call(o, op, q)
+    if code == 85 && can_prompt(o) {
+        e := parse(resp, ErrEnv{})
+        if contains(e.error.message, "token kind: human") {
+            p := ask_passphrase("sealed: " + what + "\npassphrase to authorise (empty cancels): ")
+            if p != "" {
+                again := q
+                again.passphrase = p
+                code, resp = call(o, op, again)
+            }
+        }
+    }
+    if code != 0 { fail_with(code, resp) }
+    body = resp
+}
+
+// split "NAME=path"
+func binding(s) (var_name, path, ok) {
+    var_name = ""
+    path = ""
+    ok = false
+    i := index(s, "=")
+    if i <= 0 { return }
+    var_name = substr(s, 0, i)
+    path = substr(s, i + 1, len(s))
+    ok = path != "" && env_name_ok(var_name)
+}
+
+func env_name_ok(s) (ok) {
+    ok = len(s) > 0
+    first := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_"
+    i := 0
+    while i < len(s) {
+        c := substr(s, i, i + 1)
+        if index(first, c) < 0 {
+            if i == 0 || index("0123456789", c) < 0 { ok = false }
+        }
+        i = i + 1
+    }
+}
+
+func strip_newlines(s) (out) {
+    out = s
+    while has_suffix(out, "\n") || has_suffix(out, "\r") { out = substr(out, 0, len(out) - 1) }
+}
+
+// Redact the value and its common encodings. This catches accidents, not a
+// command that deliberately transforms the value.
+func register_redactions(value) {
+    t := strip_newlines(value)
+    sh_redact(value)
+    sh_redact(t)
+    sh_redact(base64_encode(value))
+    sh_redact(base64_encode(t))
+    sh_redact(to_hex(bytes(t)))
+    lines := split(t, "\n")
+    if len(lines) > 1 {
+        for _, line := range lines {
+            l := trim(line)
+            if len(l) >= 8 { sh_redact(l) }
+        }
+    }
+}
+
+func value_of(values, name) (v) {
+    v = ""
+    for _, p := range values {
+        if p.name == name { v = p.value }
+    }
+}
+
+func cmd_exec(o, argv) {
+    vars := []string{}
+    paths := []string{}
+    modes := []int{}
+    cmd := []string{}
+    i := 0
+    sep := false
+    while i < len(argv) {
+        a := argv[i]
+        if sep {
+            cmd = append(cmd, a)
+            i = i + 1
+        } else {
+            if a == "--" {
+                sep = true
+                i = i + 1
+            } else {
+                if (a == "--env" || a == "--file") && i + 1 < len(argv) {
+                    v, p, ok := binding(argv[i + 1])
+                    if ok == false { usage_die(a + " expects NAME=secret/path") }
+                    vars = append(vars, v)
+                    paths = append(paths, p)
+                    m := 0
+                    if a == "--file" { m = 1 }
+                    modes = append(modes, m)
+                    i = i + 2
+                } else {
+                    usage_die("unexpected argument to exec: " + a)
+                }
+            }
+        }
+    }
+    if len(vars) == 0 || len(cmd) == 0 { usage_die("usage: sealed exec --env NAME=path [--file NAME=path] -- cmd [args]") }
+    q := new_req()
+    q.names = paths
+    q.purpose = "exec"
+    res := parse(call_or_exit(o, "resolve", q), ResolveOut{})
+    k := 0
+    while k < len(vars) {
+        v := value_of(res.values, paths[k])
+        register_redactions(v)
+        injected := v
+        if modes[k] == 0 { injected = strip_newlines(v) }
+        sh_env(vars[k], injected, modes[k])
+        k = k + 1
+    }
+    for _, c := range cmd { sh_arg(c) }
+    code := sh_run()
+    if code < 0 { die(110, "internal", "could not start the command (too many arguments, or no private temp directory)", []string{}) }
+    exit(code)
+}
+
+// template placeholders: {{sealed:path/to/secret}}
+func template_names(tpl) (names, ok) {
+    names = []string{}
+    ok = true
+    rest := tpl
+    open_tag := "{{sealed:"
+    i := index(rest, open_tag)
+    while i >= 0 {
+        rest = substr(rest, i + len(open_tag), len(rest))
+        j := index(rest, "}}")
+        if j < 0 { ok = false  return }
+        n := trim(substr(rest, 0, j))
+        if name_chars_ok(n) == false { ok = false  return }
+        seen := false
+        for _, have := range names {
+            if have == n { seen = true }
+        }
+        if seen == false { names = append(names, n) }
+        rest = substr(rest, j + 2, len(rest))
+        i = index(rest, open_tag)
+    }
+}
+
+// single pass: a value containing a placeholder is never expanded again
+func template_fill(tpl, values) (out) {
+    parts := []string{}
+    rest := tpl
+    open_tag := "{{sealed:"
+    i := index(rest, open_tag)
+    while i >= 0 {
+        parts = append(parts, substr(rest, 0, i))
+        rest = substr(rest, i + len(open_tag), len(rest))
+        j := index(rest, "}}")
+        parts = append(parts, strip_newlines(value_of(values, trim(substr(rest, 0, j)))))
+        rest = substr(rest, j + 2, len(rest))
+        i = index(rest, open_tag)
+    }
+    parts = append(parts, rest)
+    out = join(parts, "")
+}
+
+func cmd_render(o, tpl_path, out_path) {
+    tpl := read_file(tpl_path)
+    if tpl == "" { die(92, "not_found", "cannot read template (or it is empty): " + tpl_path, []string{}) }
+    names, ok := template_names(tpl)
+    if ok == false || len(names) == 0 { die(82, "validation", "template has no valid {{sealed:path}} placeholder", []string{}) }
+    q := new_req()
+    q.names = names
+    q.purpose = "render"
+    res := parse(call_or_exit(o, "resolve", q), ResolveOut{})
+    if sh_write_private(out_path, template_fill(tpl, res.values)) != 0 { die(90, "write_failed", "cannot write " + out_path, []string{}) }
+    println("{\"ok\":true,\"out\":" + json(out_path) + ",\"mode\":\"0600\",\"secrets\":" + str(len(names)) + "}")
+}
+
+// at a terminal: ask with hidden input. Otherwise read stdin verbatim.
+func put_value(o, name) (value) {
+    from_file := "sealed put " + name + " < file"
+    if sh_stdin_is_tty() == 1 && can_prompt(o) {
+        value = "" + sh_tty_value("value for " + name + " (hidden; paste, then Enter): ")
+        st := sh_tty_value_status()
+        if st == 1 { die(82, "validation", "too long to paste at a prompt; nothing was stored", []string{from_file}) }
+        if st == 2 || has_prefix(value, "-----BEGIN") { die(82, "validation", "multi-line value; nothing was stored", []string{from_file}) }
+        if value == "" { die(82, "validation", "empty value; nothing was stored", []string{}) }
+        // input is hidden: a second entry catches typos and bad pastes
+        again := "" + sh_tty_value("repeat the value to confirm: ")
+        if sh_tty_value_status() != 0 || again != value { die(82, "validation", "values do not match; nothing was stored", []string{}) }
+        return
+    }
+    value = "" + sh_stdin_value()
+    st := sh_stdin_status()
+    if st == 1 { die(82, "validation", "value contains a NUL byte; binary values are not supported", []string{"base64-encode it first"}) }
+    if st == 2 { die(82, "validation", "value exceeds 64 KiB", []string{}) }
+    if st == 3 { die(80, "invalid_args", "stdin is a terminal and prompting is disabled", []string{from_file}) }
+    if value == "" { die(82, "validation", "empty value on stdin", []string{}) }
+}
+
+func cmd_put(o, name) {
+    if name_chars_ok(name) == false { die(82, "validation", "bad secret name (allowed: A-Z a-z 0-9 . _ - /)", []string{}) }
+    value := put_value(o, name)
+    if valid_utf8(value) == false { die(82, "validation", "value is not valid UTF-8", []string{"base64-encode it first"}) }
+    q := new_req()
+    q.name = name
+    q.value = value
+    println(call_privileged(o, "put", q, "overwrite secret " + name))
+}
+
+func valid_utf8(s) (ok) { ok = json_valid(json(s)) }
+
+func cmd_init(o) {
+    ensure_home()
+    db, ok := db_open(o.db)
+    if ok == false { die(110, "internal", "cannot open database " + o.db, []string{}) }
+    if meta_get(db, "salt") != "" { die(95, "conflict", "already initialised: " + o.db, []string{"sealed unlock"}) }
+    if can_prompt(o) == false { die(85, "approval_required", "init needs a human at a terminal", []string{"ask human to run: sealed init"}) }
+    p1 := ask_passphrase("new passphrase (min 12 characters): ")
+    if len(p1) < 12 { die(82, "validation", "passphrase must be at least 12 characters", []string{}) }
+    p2 := ask_passphrase("repeat passphrase: ")
+    if p1 != p2 { die(82, "validation", "passphrases do not match", []string{}) }
+    salt := to_hex(rand_bytes(16))
+    k := derive_master(p1, salt)
+    sh_key_set(k)
+    iv, ct := aead_seal(from_hex(k), bytes("sealed-ok"), "verify")
+    meta_put(db, "salt", salt)
+    meta_put(db, "verify_iv", iv)
+    meta_put(db, "verify_ct", ct)
+    meta_put(db, "kdf", "argon2id t=" + str(kdf_time()) + " m=" + str(kdf_mem_kib()) + "KiB p=1")
+    id, token, made := token_create(db, "human", "*", "", 600)
+    sh_key_wipe()
+    sh_chmod(o.db, 384)
+    if made == false { die(110, "internal", "could not create the first token", []string{}) }
+    tf := home_dir() + "/token"
+    if sh_write_private(tf, token + "\n") != 0 { die(90, "write_failed", "cannot write " + tf, []string{}) }
+    println("{\"ok\":true,\"db\":" + json(o.db) + ",\"token_id\":" + json(id) + ",\"token_file\":" + json(tf) + ",\"next\":\"sealed daemon start && sealed unlock\"}")
+}
+
+func cmd_unlock(o) {
+    if can_prompt(o) == false { die(85, "approval_required", "unlock needs a human at a terminal", []string{"ask human to run: sealed unlock"}) }
+    q := new_req()
+    q.passphrase = ask_passphrase("sealed passphrase: ")
+    println(call_or_exit(o, "unlock", q))
+}
+
+func cmd_approve(o, id) {
+    if can_prompt(o) == false { die(85, "approval_required", "approve needs a human at a terminal", []string{"ask human to run: sealed approve " + id}) }
+    q := new_req()
+    q.id = id
+    a := parse(call_or_exit(o, "approval", q), ApInfo{})
+    summary := "APPROVE  " + a.verb + "  " + a.target + "\n  requested by " + a.token_kind + " token " + a.token_id + " from host \"" + a.host + "\" (self-reported)\n  state " + a.state + ", expires in " + str(a.expires_in) + "s"
+    q.passphrase = ask_passphrase(summary + "\npassphrase to approve (empty cancels): ")
+    if q.passphrase == "" { die(85, "approval_required", "cancelled", []string{}) }
+    println(call_or_exit(o, "approve", q))
+}

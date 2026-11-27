@@ -1,0 +1,477 @@
+// server: one request at a time, on purpose. No shared mutable state between
+// goroutines, so no locks and no races; the arena frees each request's strings.
+// The master key lives only in the shim's locked buffer.
+
+type Req struct { token string  host string  name string  names []string  prefix string  value string  passphrase string  id string  kind string  scope string  rate int  purpose string  cmd string }
+
+type LsItem struct { name string  version int  last_used int  scopes []string }
+type LsOut struct { ok bool  token_scope string  secrets []LsItem }
+type PutOut struct { ok bool  name string  version int }
+type ValOut struct { ok bool  name string  version int  value string }
+type Pair struct { name string  version int  value string }
+type ResolveOut struct { ok bool  values []Pair }
+type TokenOut struct { ok bool  id string  token string  kind string  scope string  rate int }
+type TokInfo struct { id string  kind string  scope string  parent string  rate int  created int  revoked bool }
+type TokLsOut struct { ok bool  tokens []TokInfo }
+type ApInfo struct { ok bool  id string  verb string  target string  token_id string  token_kind string  host string  state string  expires_in int }
+type AuditOut struct { ok bool  entries []AuditRow }
+type StatusOut struct { ok bool  locked bool  version string }
+
+type Reply struct { code int  body string }
+
+func ok_reply(body) (r) { r = Reply{code: 0, body: body} }
+func fail_reply(code, kind, msg, suggestions) (r) { r = Reply{code: code, body: err_json(code, kind, msg, suggestions)} }
+func no_hints() (s) { s = []string{} }
+
+func locked_reply() (r) { r = fail_reply(86, "locked", "the store is locked", []string{"ask a human to run: sealed unlock"}) }
+
+// passphrase_gate verifies a passphrase with a global failure throttle.
+func passphrase_gate(db, pass) (hexkey, bad) {
+    hexkey = ""
+    bad = Reply{code: 0, body: ""}
+    minute := str(now() / 60)
+    failures := 0
+    if meta_get(db, "fail_minute") == minute { failures = parse_int(meta_get(db, "fail_count")) }
+    if failures >= max_pass_failures() {
+        bad = fail_reply(101, "rate_limited", "too many wrong passphrases; wait a minute", no_hints())
+        return
+    }
+    hexkey = check_passphrase(db, pass)
+    if hexkey == "" {
+        meta_put(db, "fail_minute", minute)
+        meta_put(db, "fail_count", str(failures + 1))
+        bad = fail_reply(89, "bad_passphrase", "wrong passphrase", no_hints())
+    }
+}
+
+// authorise_privileged: a human token plus the passphrase acts directly;
+// anything else needs an approval granted by `sealed approve`.
+func authorise_privileged(db, me, q, verb, target, digest) (allowed, r) {
+    allowed = false
+    r = Reply{code: 0, body: ""}
+    if me.kind == "human" && q.passphrase != "" {
+        k, bad := passphrase_gate(db, q.passphrase)
+        if k == "" {
+            audit(db, me.id, me.kind, q.host, target, verb, "bad_passphrase")
+            r = bad
+            return
+        }
+        allowed = true
+        return
+    }
+    granted, id := approval_gate(db, me.id, verb, target, digest, q.host)
+    if granted { allowed = true  return }
+    audit(db, me.id, me.kind, q.host, target, verb, "approval_required")
+    hints := []string{"ask human to run: sealed approve " + id, "then re-run the same command within 10 minutes"}
+    r = fail_reply(85, "approval_required", verb + " " + target + " needs human approval (" + id + ", token kind: " + me.kind + ")", hints)
+}
+
+func scope_denied(db, me, q, target, verb) (r) {
+    audit(db, me.id, me.kind, q.host, target, verb, "forbidden_scope")
+    r = fail_reply(87, "forbidden_scope", "token scope \"" + me.scope + "\" does not cover " + target, []string{"sealed ls"})
+}
+
+func covered(chain, name) (ok) {
+    ok = true
+    for _, t := range chain {
+        if scope_covers(t.scope, name) == false { ok = false }
+    }
+}
+
+func op_ls(db, me, chain, q) (r) {
+    rows := parse(sqlite_query(db, "SELECT s.name AS name, MAX(s.version) AS version, MAX(s.created) AS created, COALESCE(u.last_used,0) AS last_used FROM secrets s LEFT JOIN secret_use u ON u.name=s.name GROUP BY s.name ORDER BY s.name"), []NameRow{})
+    toks := []TokRow{}
+    if me.kind == "human" {
+        for _, t := range token_rows(db, "revoked=?", "0") {
+            if token_valid_row(t) { toks = append(toks, t) }
+        }
+    }
+    items := []LsItem{}
+    for _, n := range rows {
+        if covered(chain, n.name) && has_prefix(n.name, q.prefix) {
+            scopes := []string{}
+            for _, t := range toks {
+                if scope_covers(t.scope, n.name) { scopes = append(scopes, t.kind + ":" + t.id + ":" + t.scope) }
+            }
+            items = append(items, LsItem{name: n.name, version: n.version, last_used: n.last_used, scopes: scopes})
+        }
+    }
+    audit(db, me.id, me.kind, q.host, q.prefix, "ls", "ok")
+    r = ok_reply(json(LsOut{ok: true, token_scope: me.scope, secrets: items}))
+}
+
+func op_put(db, me, chain, q) (r) {
+    if name_chars_ok(q.name) == false { r = fail_reply(82, "validation", "bad secret name (allowed: A-Z a-z 0-9 . _ - /)", no_hints())  return }
+    if q.value == "" { r = fail_reply(82, "validation", "empty value", []string{"pipe the value on stdin"})  return }
+    if covered(chain, q.name) == false { r = scope_denied(db, me, q, q.name, "put")  return }
+    cur, found := latest_secret(db, q.name)
+    next := 1
+    if found {
+        next = cur.version + 1
+        // overwriting: agents always need approval; humans need the passphrase
+        digest := mac_of("put|" + q.name + "|" + str(cur.version) + "|" + q.value)
+        allowed, denied := authorise_privileged(db, me, q, "put", q.name, digest)
+        if allowed == false { r = denied  return }
+    }
+    if secret_store(db, q.name, next, q.value) == false { r = fail_reply(110, "internal", "write failed", no_hints())  return }
+    audit(db, me.id, me.kind, q.host, q.name, "put", "ok")
+    r = ok_reply(json(PutOut{ok: true, name: q.name, version: next}))
+}
+
+// resolve hands plaintext to the sealed client, which injects it into a child
+// process or a 0600 file. All-or-nothing: one denied name releases none.
+func op_resolve(db, me, chain, q) (r) {
+    verb := "exec"
+    if q.purpose == "render" { verb = "render" }
+    if len(q.names) == 0 || len(q.names) > 64 { r = fail_reply(80, "invalid_args", "between 1 and 64 secrets per call", no_hints())  return }
+    for _, n := range q.names {
+        if name_chars_ok(n) == false { r = fail_reply(82, "validation", "bad secret name", no_hints())  return }
+        if covered(chain, n) == false { r = scope_denied(db, me, q, n, verb)  return }
+    }
+    out := []Pair{}
+    for _, n := range q.names {
+        row, found := latest_secret(db, n)
+        if found == false {
+            audit(db, me.id, me.kind, q.host, n, verb, "not_found")
+            r = fail_reply(92, "not_found", "no such secret: " + n, []string{"sealed ls"})
+            return
+        }
+        value, ok := secret_open(row)
+        if ok == false {
+            audit(db, me.id, me.kind, q.host, n, verb, "decrypt_failed")
+            r = fail_reply(110, "internal", "cannot decrypt " + n + " (corrupted or tampered row)", no_hints())
+            return
+        }
+        out = append(out, Pair{name: n, version: row.version, value: value})
+    }
+    for _, n := range q.names {
+        sqlite_exec(db, "INSERT OR REPLACE INTO secret_use(name,last_used) VALUES(?,?)", []string{n, str(now())})
+        audit(db, me.id, me.kind, q.host, n, verb, "ok")
+    }
+    r = ok_reply(json(ResolveOut{ok: true, values: out}))
+}
+
+// reveal: human token AND passphrase typed at a terminal. There is no approval
+// id path, and no path at all for agent tokens.
+func op_reveal(db, me, chain, q) (r) {
+    if me.kind != "human" {
+        audit(db, me.id, me.kind, q.host, q.name, "reveal", "forbidden_kind")
+        r = fail_reply(83, "forbidden_kind", "agent tokens can never reveal a secret", []string{"sealed exec --env NAME=" + q.name + " -- <cmd>"})
+        return
+    }
+    if covered(chain, q.name) == false { r = scope_denied(db, me, q, q.name, "reveal")  return }
+    if q.passphrase == "" {
+        audit(db, me.id, me.kind, q.host, q.name, "reveal", "approval_required")
+        r = fail_reply(85, "approval_required", "reveal needs the passphrase, typed at a terminal", []string{"ask human to run in a terminal: sealed get " + q.name + " --reveal"})
+        return
+    }
+    k, bad := passphrase_gate(db, q.passphrase)
+    if k == "" { audit(db, me.id, me.kind, q.host, q.name, "reveal", "bad_passphrase")  r = bad  return }
+    row, found := latest_secret(db, q.name)
+    if found == false { r = fail_reply(92, "not_found", "no such secret: " + q.name, []string{"sealed ls"})  return }
+    value, ok := secret_open(row)
+    if ok == false { r = fail_reply(110, "internal", "cannot decrypt " + q.name, no_hints())  return }
+    audit(db, me.id, me.kind, q.host, q.name, "reveal", "ok")
+    r = ok_reply(json(ValOut{ok: true, name: q.name, version: row.version, value: value}))
+}
+
+func op_rm(db, me, chain, q) (r) {
+    if covered(chain, q.name) == false { r = scope_denied(db, me, q, q.name, "rm")  return }
+    cur, found := latest_secret(db, q.name)
+    if found == false { r = fail_reply(92, "not_found", "no such secret: " + q.name, []string{"sealed ls"})  return }
+    allowed, denied := authorise_privileged(db, me, q, "rm", q.name, str(cur.version) + ":" + str(cur.created))
+    if allowed == false { r = denied  return }
+    if sqlite_exec(db, "DELETE FROM secrets WHERE name=?", []string{q.name}) != 0 { r = fail_reply(110, "internal", "delete failed", no_hints())  return }
+    sqlite_exec(db, "DELETE FROM secret_use WHERE name=?", []string{q.name})
+    audit(db, me.id, me.kind, q.host, q.name, "rm", "ok")
+    r = ok_reply("{\"ok\":true,\"removed\":" + json(q.name) + "}")
+}
+
+// A child token never exceeds its parent: kind, scope, and rate. An agent may
+// mint a narrower agent token; a human token also needs the passphrase.
+func op_token_create(db, me, chain, q) (r) {
+    if q.kind != "human" && q.kind != "agent" { r = fail_reply(80, "invalid_args", "--kind must be human or agent", no_hints())  return }
+    if scope_ok(q.scope) == false { r = fail_reply(82, "validation", "bad scope (use a path prefix, or *)", no_hints())  return }
+    rate := q.rate
+    if rate <= 0 { rate = me.rate }
+    if me.kind == "agent" && q.kind != "agent" {
+        audit(db, me.id, me.kind, q.host, q.scope, "token_create", "forbidden_kind")
+        r = fail_reply(83, "forbidden_kind", "an agent token cannot create a human token", no_hints())
+        return
+    }
+    for _, t := range chain {
+        if scope_within(t.scope, q.scope) == false { r = scope_denied(db, me, q, q.scope, "token_create")  return }
+        if rate > t.rate { r = fail_reply(87, "forbidden_scope", "rate cannot exceed the parent's " + str(t.rate) + "/min", no_hints())  return }
+    }
+    if me.kind == "human" {
+        allowed, denied := authorise_privileged(db, me, q, "token_create", q.kind + " token, scope " + q.scope + ", " + str(rate) + "/min", q.kind + "|" + q.scope + "|" + str(rate))
+        if allowed == false { r = denied  return }
+    }
+    id, token, ok := token_create(db, q.kind, q.scope, me.id, rate)
+    if ok == false { r = fail_reply(110, "internal", "could not create token", no_hints())  return }
+    audit(db, me.id, me.kind, q.host, q.scope, "token_create", "ok:" + id)
+    r = ok_reply(json(TokenOut{ok: true, id: id, token: token, kind: q.kind, scope: q.scope, rate: rate}))
+}
+
+func is_descendant(db, id, ancestor) (yes) {
+    yes = false
+    cur := id
+    depth := 0
+    while depth < 16 && cur != "" {
+        rows := token_rows(db, "id=?", cur)
+        if len(rows) != 1 { return }
+        cur = rows[0].parent
+        if cur == ancestor { yes = true  return }
+        depth = depth + 1
+    }
+}
+
+func op_token_ls(db, me, q) (r) {
+    out := []TokInfo{}
+    for _, t := range token_rows(db, "id<>?", "") {
+        if me.kind == "human" || t.id == me.id || is_descendant(db, t.id, me.id) {
+            out = append(out, TokInfo{id: t.id, kind: t.kind, scope: t.scope, parent: t.parent, rate: t.rate, created: t.created, revoked: t.revoked != 0})
+        }
+    }
+    r = ok_reply(json(TokLsOut{ok: true, tokens: out}))
+}
+
+func op_token_revoke(db, me, q) (r) {
+    rows := token_rows(db, "id=?", q.id)
+    if len(rows) != 1 { r = fail_reply(92, "not_found", "no such token id", []string{"sealed token ls"})  return }
+    t := rows[0]
+    if is_descendant(db, t.id, me.id) == false && t.id != me.id {
+        if me.kind != "human" { r = fail_reply(83, "forbidden_kind", "an agent token can only revoke itself or its children", no_hints())  return }
+        allowed, denied := authorise_privileged(db, me, q, "token_revoke", t.id, "")
+        if allowed == false { r = denied  return }
+    }
+    t.revoked = 1
+    sqlite_exec(db, "UPDATE tokens SET revoked=1, mac=? WHERE id=?", []string{mac_of(tok_mac_data(t)), t.id})
+    audit(db, me.id, me.kind, q.host, t.id, "token_revoke", "ok")
+    r = ok_reply("{\"ok\":true,\"revoked\":" + json(t.id) + "}")
+}
+
+// approval_show / approve need no token: the random id identifies the request,
+// and granting it takes the passphrase.
+func op_approval(db, q, grant) (r) {
+    rows := ap_rows(db, "id=?", []string{q.id})
+    if len(rows) != 1 { r = fail_reply(92, "not_found", "no such approval id", no_hints())  return }
+    a := rows[0]
+    if a.mac != mac_of(ap_mac_data(a)) { r = fail_reply(110, "internal", "approval row failed its integrity check", no_hints())  return }
+    left := a.created + approval_ttl() - now()
+    kind := ""
+    toks := token_rows(db, "id=?", a.token_id)
+    if len(toks) == 1 { kind = toks[0].kind }
+    if grant {
+        if a.state != "pending" || left <= 0 { r = fail_reply(95, "conflict", "approval is " + a.state + " or expired", []string{"re-run the original command to get a new id"})  return }
+        k, bad := passphrase_gate(db, q.passphrase)
+        if k == "" { audit(db, a.token_id, kind, q.host, a.target, "approve", "bad_passphrase")  r = bad  return }
+        if ap_set_state(db, a, "approved") == false { r = fail_reply(110, "internal", "could not approve", no_hints())  return }
+        a.state = "approved"
+        audit(db, a.token_id, kind, q.host, a.target, "approve", "ok:" + a.id + ":" + a.verb)
+    }
+    r = ok_reply(json(ApInfo{ok: true, id: a.id, verb: a.verb, target: a.target, token_id: a.token_id, token_kind: kind, host: a.host, state: a.state, expires_in: left}))
+}
+
+func op_audit(db, me, q) (r) {
+    sql := "SELECT seq,ts,token_id,kind,host,secret,verb,result FROM audit"
+    rows := []AuditRow{}
+    if me.kind == "human" {
+        rows = parse(sqlite_query(db, sql + " ORDER BY seq DESC LIMIT 200"), []AuditRow{})
+    } else {
+        rows = parse(sqlite_query(db, sql + " WHERE token_id=? ORDER BY seq DESC LIMIT 200", []string{me.id}), []AuditRow{})
+    }
+    r = ok_reply(json(AuditOut{ok: true, entries: rows}))
+}
+
+func op_unlock(db, q) (r) {
+    k, bad := passphrase_gate(db, q.passphrase)
+    if k == "" { audit(db, "", "", q.host, "", "unlock", "failed")  r = bad  return }
+    sh_key_set(k)
+    audit(db, "", "", q.host, "", "unlock", "ok")
+    r = ok_reply("{\"ok\":true,\"locked\":false}")
+}
+
+func dispatch_op(db, op, q, local) (r) {
+    if op == "status" {
+        r = ok_reply(json(StatusOut{ok: true, locked: sh_key_present() == 0, version: app_version()}))
+        return
+    }
+    if op == "unlock" || op == "approve" || op == "approval" {
+        // passphrases cross the wire here: loopback peers only
+        if local == false { r = fail_reply(83, "forbidden_kind", op + " is only accepted from the daemon's own host", no_hints())  return }
+    }
+    if op == "unlock" { r = op_unlock(db, q)  return }
+    if sh_key_present() == 0 { r = locked_reply()  return }
+    if op == "approval" { r = op_approval(db, q, false)  return }
+    if op == "approve" { r = op_approval(db, q, true)  return }
+    chain := token_chain(db, q.token)
+    if len(chain) == 0 {
+        audit(db, "", "", q.host, "", op, "not_authenticated")
+        r = fail_reply(90, "not_authenticated", "missing, unknown or revoked token", []string{"set SEALED_TOKEN or SEALED_TOKEN_FILE"})
+        return
+    }
+    me := chain[0]
+    if q.passphrase != "" && local == false { r = fail_reply(83, "forbidden_kind", "passphrases are only accepted from the daemon's own host", no_hints())  return }
+    if rate_take(db, chain) == false {
+        audit(db, me.id, me.kind, q.host, q.name, op, "rate_limited")
+        r = fail_reply(101, "rate_limited", "token rate limit exceeded; retry next minute", no_hints())
+        return
+    }
+    if op == "lock" {
+        sh_key_wipe()
+        audit(db, me.id, me.kind, q.host, "", "lock", "ok")
+        r = ok_reply("{\"ok\":true,\"locked\":true}")
+        return
+    }
+    if op == "ls" { r = op_ls(db, me, chain, q)  return }
+    if op == "put" { r = op_put(db, me, chain, q)  return }
+    if op == "resolve" { r = op_resolve(db, me, chain, q)  return }
+    if op == "reveal" { r = op_reveal(db, me, chain, q)  return }
+    if op == "rm" { r = op_rm(db, me, chain, q)  return }
+    if op == "token_create" { r = op_token_create(db, me, chain, q)  return }
+    if op == "token_ls" { r = op_token_ls(db, me, q)  return }
+    if op == "token_revoke" { r = op_token_revoke(db, me, q)  return }
+    if op == "audit" { r = op_audit(db, me, q)  return }
+    r = fail_reply(92, "not_found", "unknown operation", no_hints())
+}
+
+func max_request() (n) { n = 524288 }
+
+func header_value(head, name) (v) {
+    v = ""
+    for _, line := range split(head, "\r\n") {
+        i := index(line, ":")
+        if i > 0 {
+            if lower(substr(line, 0, i)) == name { v = trim(substr(line, i + 1, len(line))) }
+        }
+    }
+}
+
+func read_http(conn) (head, body, ok) {
+    head = ""
+    body = ""
+    ok = false
+    raw := ""
+    sep := 0 - 1
+    deadline := now_ms() + 5000
+    while sep < 0 {
+        chunk := read(conn)
+        if chunk == "" || len(raw) > max_request() || now_ms() > deadline { return }
+        raw = raw + chunk
+        sep = index(raw, "\r\n\r\n")
+    }
+    head = substr(raw, 0, sep)
+    clen := parse_int(header_value(head, "content-length"))
+    if clen < 0 || clen > max_request() { return }
+    body = substr(raw, sep + 4, len(raw))
+    while len(body) < clen {
+        chunk := read(conn)
+        if chunk == "" || now_ms() > deadline { return }
+        body = body + chunk
+    }
+    ok = true
+}
+
+func respond(conn, status, body) {
+    write(conn, "HTTP/1.1 " + status + "\r\nContent-Type: application/json; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: " + str(len(body)) + "\r\nConnection: close\r\n\r\n" + body)
+}
+
+func is_loopback(h) (yes) { yes = h == "127.0.0.1" || h == "localhost" || h == "::1" || has_prefix(h, "127.") || h == "::ffff:127.0.0.1" }
+
+// the host label is caller-controlled and ends up in the approver's terminal
+func clean_label(s) (out) {
+    allowed := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+    parts := []string{}
+    i := 0
+    while i < len(s) && i < 64 {
+        c := substr(s, i, i + 1)
+        if index(allowed, c) < 0 { c = "?" }
+        parts = append(parts, c)
+        i = i + 1
+    }
+    out = join(parts, "")
+}
+
+// handle_conn returns true when the daemon should exit.
+func handle_conn(db, conn, bind_host, shutdown_token) (stop) {
+    stop = false
+    socket_timeout(conn, 3000)
+    head, body, ok := read_http(conn)
+    if ok == false { return }
+    parts := split(split(head, "\r\n")[0], " ")
+    if len(parts) < 2 { return }
+    method := parts[0]
+    path := parts[1]
+    // a browser must never drive this API (CSRF, DNS rebinding)
+    hosth := header_value(head, "host")
+    host_ok := has_prefix(hosth, "127.0.0.1") || has_prefix(hosth, "localhost") || has_prefix(hosth, "[::1]") || has_prefix(hosth, bind_host)
+    if header_value(head, "origin") != "" || host_ok == false {
+        respond(conn, "403 Forbidden", err_json(83, "forbidden_kind", "browser or foreign-host requests are refused", []string{}))
+        return
+    }
+    if method == "GET" && path == "/_health" {
+        respond(conn, "200 OK", "{\"ok\":true,\"service\":\"sealed\",\"pid\":" + str(sh_pid()) + "}")
+        return
+    }
+    if method == "GET" && path == "/guide" { respond(conn, "200 OK", guide_json())  return }
+    if method == "GET" && path == "/llms.txt" {
+        respond(conn, "200 OK", "sealed: a secret store agents can use without reading. Run `sealed guide` (or GET /guide).\n1. sealed ls\n2. sealed exec --env NAME=path -- cmd\n")
+        return
+    }
+    if method == "POST" && path == "/_shutdown" {
+        if is_loopback(bind_host) == false {
+            if header_value(head, "authorization") != "Bearer " + shutdown_token {
+                respond(conn, "403 Forbidden", err_json(83, "forbidden_kind", "shutdown token required", []string{}))
+                return
+            }
+        }
+        respond(conn, "200 OK", "{\"ok\":true,\"stopping\":true}")
+        stop = true
+        return
+    }
+    if method == "POST" && has_prefix(path, "/v1/") {
+        if json_valid(body) == false { respond(conn, "400 Bad Request", err_json(80, "invalid_args", "body is not JSON", []string{}))  return }
+        q := parse(body, Req{})
+        q.host = clean_label(q.host)
+        res := dispatch_op(db, substr(path, 4, len(path)), q, is_loopback("" + peer_addr(conn)))
+        status := "200 OK"
+        if res.code != 0 { status = "400 Bad Request" }
+        respond(conn, status, res.body)
+        return
+    }
+    respond(conn, "404 Not Found", err_json(92, "not_found", "no such route", []string{}))
+}
+
+func serve_forever(db, host, port, shutdown_token) {
+    srv := listen_on(host, port)
+    if srv < 0 { die(100, "bind_failed", "cannot listen on " + host + ":" + str(port), []string{"sealed daemon status"}) }
+    write(2, "[serve] listening on http://" + host + ":" + str(port) + " (locked)\n")
+    running := true
+    while running {
+        arena {
+            conn := accept(srv)
+            if conn >= 0 {
+                if handle_conn(db, conn, host, shutdown_token) { running = false }
+                close(conn)
+            }
+        }
+    }
+    sh_key_wipe()
+    close(srv)
+}
+
+func lower(s) (out) {
+    up := "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    low := "abcdefghijklmnopqrstuvwxyz"
+    parts := []string{}
+    i := 0
+    while i < len(s) {
+        c := substr(s, i, i + 1)
+        k := index(up, c)
+        if k >= 0 { c = substr(low, k, k + 1) }
+        parts = append(parts, c)
+        i = i + 1
+    }
+    out = join(parts, "")
+}

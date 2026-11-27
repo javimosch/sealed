@@ -1,0 +1,140 @@
+// main: argument parsing and dispatch.
+
+func flag_takes_value(a) (yes) {
+    yes = a == "--db" || a == "--host" || a == "--port" || a == "--kind" || a == "--scope" || a == "--rate" || a == "--out" || a == "--context" || a == "--prefix"
+}
+
+func main() {
+    sh_harden()
+    all := args()
+    if len(all) < 2 { usage_die("no command") }
+    verb := all[1]
+    rest := []string{}
+    i := 2
+    while i < len(all) {
+        rest = append(rest, all[i])
+        i = i + 1
+    }
+
+    // everything after `exec` before "--" belongs to exec; global flags do not apply
+    values := make(map[string]string)
+    flags := make(map[string]string)
+    pos := []string{}
+    if verb != "exec" {
+        j := 0
+        while j < len(rest) {
+            a := rest[j]
+            if flag_takes_value(a) {
+                if j + 1 >= len(rest) { usage_die(a + " needs a value") }
+                values[a] = rest[j + 1]
+                j = j + 2
+            } else {
+                if has_prefix(a, "--") { flags[a] = "1" } else { pos = append(pos, a) }
+                j = j + 1
+            }
+        }
+    }
+    for _, f := range keys(flags) {
+        if f != "--json" && f != "--no-interactive" && f != "--yes" && f != "--reveal" && f != "--human" && f != "--check" && f != "--force" { usage_die("unknown flag " + f) }
+    }
+
+    dbp := values["--db"]
+    if dbp == "" { dbp = env("SEALED_DB") }
+    if dbp == "" { dbp = home_dir() + "/sealed.db" }
+    host := values["--host"]
+    if host == "" { host = env("SEALED_HOST") }
+    if host == "" { host = "127.0.0.1" }
+    ps := values["--port"]
+    if ps == "" { ps = env("SEALED_PORT") }
+    port := 8744
+    if ps != "" { port = parse_int(ps) }
+    if port <= 0 || port > 65535 { usage_die("bad --port") }
+    o := Opts{db: dbp, host: host, port: port, interactive: has(flags, "--no-interactive") == false}
+
+    arg1 := ""
+    if len(pos) > 0 { arg1 = pos[0] }
+
+    if verb == "exec" {
+        cmd_exec(o, rest)
+        return
+    }
+
+    if verb == "help-json" || verb == "help" || verb == "--help-json" || verb == "--help" { println(help_json())  return }
+    if verb == "version" || verb == "--version" { println("{\"ok\":true,\"tool\":\"sealed\",\"version\":" + json(app_version()) + ",\"build\":" + json(substr(self_sha(), 0, 12)) + "}")  return }
+    if verb == "guide" {
+        if has(flags, "--human") { println(guide_human()) } else { println(guide_json()) }
+        return
+    }
+    if verb == "feedback" { cmd_feedback(o, join(pos, " "), values["--kind"], values["--context"])  return }
+    if verb == "update" { cmd_update(has(flags, "--check"), has(flags, "--force"))  return }
+    if verb == "install" { cmd_install(values["--prefix"], false)  return }
+    if verb == "uninstall" { cmd_install(values["--prefix"], true)  return }
+    if verb == "serve" { cmd_serve(o)  return }
+    if verb == "daemon" { cmd_daemon(o, arg1)  return }
+    if verb == "init" { cmd_init(o)  return }
+    if verb == "unlock" { cmd_unlock(o)  return }
+    if verb == "status" { println(call_or_exit(o, "status", new_req()))  return }
+    if verb == "lock" { println(call_or_exit(o, "lock", new_req()))  return }
+    if verb == "ls" {
+        q := new_req()
+        q.prefix = arg1
+        println(call_or_exit(o, "ls", q))
+        return
+    }
+    if verb == "put" {
+        if len(pos) != 1 { usage_die("usage: sealed put <name>  (asks with hidden input, or reads stdin; never argv)") }
+        cmd_put(o, arg1)
+        return
+    }
+    if verb == "render" {
+        if len(pos) != 1 || values["--out"] == "" { usage_die("usage: sealed render <template> --out <file>") }
+        cmd_render(o, arg1, values["--out"])
+        return
+    }
+    if verb == "get" {
+        if len(pos) != 1 || has(flags, "--reveal") == false { usage_die("usage: sealed get <name> --reveal") }
+        q := new_req()
+        q.name = arg1
+        // the passphrase is asked for every reveal; the token alone is never enough
+        code, resp := call(o, "reveal", q)
+        if code == 85 && can_prompt(o) {
+            q.passphrase = ask_passphrase("sealed: REVEAL " + arg1 + "\npassphrase to authorise (empty cancels): ")
+            if q.passphrase != "" { code, resp = call(o, "reveal", q) }
+        }
+        if code != 0 { fail_with(code, resp) }
+        println(resp)
+        return
+    }
+    if verb == "rm" {
+        if len(pos) != 1 { usage_die("usage: sealed rm <name>") }
+        q := new_req()
+        q.name = arg1
+        println(call_privileged(o, "rm", q, "DELETE secret " + arg1 + " (all versions)"))
+        return
+    }
+    if verb == "token" {
+        q := new_req()
+        if arg1 == "create" {
+            if values["--kind"] == "" || values["--scope"] == "" { usage_die("usage: sealed token create --kind human|agent --scope <prefix> [--rate n]") }
+            q.kind = values["--kind"]
+            q.scope = values["--scope"]
+            q.rate = parse_int(values["--rate"])
+            println(call_privileged(o, "token_create", q, "CREATE " + q.kind + " token with scope " + q.scope))
+            return
+        }
+        if arg1 == "ls" { println(call_or_exit(o, "token_ls", q))  return }
+        if arg1 == "revoke" && len(pos) == 2 {
+            q.id = pos[1]
+            println(call_privileged(o, "token_revoke", q, "REVOKE token " + q.id))
+            return
+        }
+        usage_die("usage: sealed token create|ls|revoke <id>")
+    }
+    if verb == "approve" {
+        if len(pos) != 1 { usage_die("usage: sealed approve <id>") }
+        cmd_approve(o, arg1)
+        return
+    }
+    if verb == "audit" { println(call_or_exit(o, "audit", new_req()))  return }
+    usage_die("unknown command: " + verb)
+}

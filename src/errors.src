@@ -1,0 +1,21 @@
+// errors: the typed error body (cli-output-spec §3). The code is the exit code.
+type ErrBody struct { code int  message string  recoverable bool  suggestions []string }
+type ErrEnv struct { ok bool  error ErrBody }
+
+// 80 invalid_args · 82 validation · 83 forbidden_kind · 85 approval_required
+// 86 locked · 87 forbidden_scope · 89 bad_passphrase · 90 not_authenticated
+// 92 not_found · 95 conflict · 100 daemon_unreachable · 101 rate_limited · 110 internal
+func err_json(code, kind, msg, suggestions) (s) {
+    rec := "false"
+    if code >= 100 && code < 110 { rec = "true" }
+    hints := "[]"
+    if len(suggestions) > 0 { hints = json(suggestions) }
+    s = "{\"ok\":false,\"error\":{\"code\":" + str(code) + ",\"type\":" + json(kind) + ",\"message\":" + json(msg) + ",\"recoverable\":" + rec + ",\"suggestions\":" + hints + "}}"
+}
+
+func die(code, kind, msg, suggestions) {
+    write(2, err_json(code, kind, msg, suggestions) + "\n")
+    exit(code)
+}
+
+func usage_die(msg) { die(80, "invalid_args", msg, []string{"sealed help-json", "sealed guide"}) }

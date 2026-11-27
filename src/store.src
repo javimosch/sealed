@@ -1,0 +1,276 @@
+// store: schema, crypto, tokens, approvals, rate limits, audit.
+//
+// Every value has its own AES-256-GCM data key (DEK). The DEK is wrapped by the
+// master key, Argon2id(passphrase, salt). AAD binds each ciphertext to its
+// name and version, so rows cannot be swapped to move a value into another
+// scope. Token and approval rows carry an HMAC under a key derived from the
+// master key: write access to the DB file is not enough to forge them.
+
+extern "sh" {
+    header "shim.h"
+    fn sh_harden() int
+    fn sh_pid() int
+    fn sh_exists(string) int
+    fn sh_key_set(string) int
+    fn sh_key_present() int
+    fn sh_key_get() string
+    fn sh_key_wipe() int
+    fn sh_tty_secret(string) string
+    fn sh_has_tty() int
+    fn sh_stdin_value() string
+    fn sh_tty_value(string) string
+    fn sh_tty_value_status() int
+    fn sh_stdin_is_tty() int
+    fn sh_stdin_status() int
+    fn sh_write_private(string, string) int
+    fn sh_private_dir(string) int
+    fn sh_chmod(string, int) int
+    fn sh_install_self(string) int
+    fn sh_self_path() string
+    fn sh_arg(string) int
+    fn sh_env(string, string, int) int
+    fn sh_redact(string) int
+    fn sh_run() int
+    fn sh_spawn_detached(string) int
+}
+
+type KV struct { v string }
+type TokRow struct { id string  hash string  kind string  scope string  parent string  rate int  created int  revoked int  mac string }
+type SecRow struct { name string  version int  wiv string  wdk string  iv string  ct string  created int }
+type NameRow struct { name string  version int  created int  last_used int }
+type ApRow struct { id string  token_id string  verb string  target string  digest string  host string  state string  created int  mac string }
+type AuditRow struct { seq int  ts int  token_id string  kind string  host string  secret string  verb string  result string }
+type CountRow struct { n int }
+
+func kdf_time() (n) { n = 3 }
+func kdf_mem_kib() (n) { n = 65536 }
+func approval_ttl() (n) { n = 600 }
+func max_pass_failures() (n) { n = 5 }
+
+func db_open(path) (db, ok) {
+    ok = false
+    db = sqlite_open(path)
+    if db == 0 { return }
+    sqlite_exec(db, "PRAGMA journal_mode=WAL")
+    stmts := []string{
+        "CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS secrets(name TEXT NOT NULL, version INTEGER NOT NULL, wiv TEXT, wdk TEXT, iv TEXT, ct TEXT, created INTEGER, PRIMARY KEY(name,version))",
+        "CREATE TABLE IF NOT EXISTS secret_use(name TEXT PRIMARY KEY, last_used INTEGER)",
+        "CREATE TABLE IF NOT EXISTS tokens(id TEXT PRIMARY KEY, hash TEXT UNIQUE, kind TEXT, scope TEXT, parent TEXT, rate INTEGER, created INTEGER, revoked INTEGER, mac TEXT)",
+        "CREATE TABLE IF NOT EXISTS approvals(id TEXT PRIMARY KEY, token_id TEXT, verb TEXT, target TEXT, digest TEXT, host TEXT, state TEXT, created INTEGER, mac TEXT)",
+        "CREATE TABLE IF NOT EXISTS rate(token_id TEXT, minute INTEGER, n INTEGER, PRIMARY KEY(token_id,minute))",
+        "CREATE TABLE IF NOT EXISTS audit(seq INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, token_id TEXT, kind TEXT, host TEXT, secret TEXT, verb TEXT, result TEXT)",
+        "CREATE TRIGGER IF NOT EXISTS audit_no_update BEFORE UPDATE ON audit BEGIN SELECT RAISE(ABORT,'audit is append-only'); END",
+        "CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON audit BEGIN SELECT RAISE(ABORT,'audit is append-only'); END"
+    }
+    for _, s := range stmts {
+        if sqlite_exec(db, s) != 0 { return }
+    }
+    ok = true
+}
+
+func meta_get(db, k) (v) {
+    v = ""
+    rows := parse(sqlite_query(db, "SELECT v FROM meta WHERE k=?", []string{k}), []KV{})
+    if len(rows) == 1 { v = rows[0].v }
+}
+
+func meta_put(db, k, v) (rc) { rc = sqlite_exec(db, "INSERT OR REPLACE INTO meta(k,v) VALUES(?,?)", []string{k, v}) }
+
+func derive_master(pass, salt_hex) (hexkey) {
+    hexkey = to_hex(argon2id(bytes(pass), from_hex(salt_hex), kdf_time(), kdf_mem_kib(), 1, 32))
+}
+
+func aead_seal(key, plain, aad) (iv_b64, ct_b64) {
+    iv := rand_bytes(12)
+    iv_b64 = base64_encode_bytes(iv)
+    ct_b64 = base64_encode_bytes(aes_gcm_encrypt(key, iv, plain, bytes(aad)))
+}
+
+// empty result == authentication failure (empty plaintext is never stored)
+func aead_open(key, iv_b64, ct_b64, aad) (plain) {
+    plain = aes_gcm_decrypt(key, base64_decode_bytes(iv_b64), base64_decode_bytes(ct_b64), bytes(aad))
+}
+
+// from_hex consumes the shim buffer immediately, making no extra string copy
+func master_bytes() (k) { k = from_hex(sh_key_get()) }
+
+func mac_of(data) (m) {
+    sub := to_hex(hkdf_sha256(master_bytes(), bytes("sealed"), bytes("row-mac-v1"), 32))
+    m = hmac_sha256(sub, data)
+}
+
+// check_passphrase returns the master key hex, or "" if the passphrase is wrong.
+func check_passphrase(db, pass) (hexkey) {
+    hexkey = ""
+    if pass == "" { return }
+    k := derive_master(pass, meta_get(db, "salt"))
+    plain := aead_open(from_hex(k), meta_get(db, "verify_iv"), meta_get(db, "verify_ct"), "verify")
+    if bytes_str(plain) == "sealed-ok" { hexkey = k }
+}
+
+func new_id(prefix) (id) { id = prefix + to_hex(rand_bytes(6)) }
+
+func tok_mac_data(t) (s) { s = "tok|" + t.id + "|" + t.hash + "|" + t.kind + "|" + t.scope + "|" + t.parent + "|" + str(t.rate) + "|" + str(t.revoked) }
+
+// token_create needs the master key to be present (it MACs the row).
+func token_create(db, kind, scope, parent, rate) (id, token, ok) {
+    id = new_id("tk_")
+    token = "sld_" + to_hex(rand_bytes(32))
+    t := TokRow{id: id, hash: sha256(token), kind: kind, scope: scope, parent: parent, rate: rate, created: now(), revoked: 0, mac: ""}
+    rc := sqlite_exec(db, "INSERT INTO tokens(id,hash,kind,scope,parent,rate,created,revoked,mac) VALUES(?,?,?,?,?,?,?,0,?)", []string{t.id, t.hash, t.kind, t.scope, t.parent, str(t.rate), str(t.created), mac_of(tok_mac_data(t))})
+    ok = rc == 0
+}
+
+func token_rows(db, where, arg) (rows) {
+    rows = parse(sqlite_query(db, "SELECT id,hash,kind,scope,parent,rate,created,revoked,mac FROM tokens WHERE " + where, []string{arg}), []TokRow{})
+}
+
+func token_valid_row(t) (ok) { ok = t.revoked == 0 && t.mac == mac_of(tok_mac_data(t)) }
+
+// token_chain returns the token and its ancestors. Empty means invalid: an
+// unknown token, a forged row, or a revoked token anywhere up the chain.
+func token_chain(db, token) (chain) {
+    chain = []TokRow{}
+    rows := token_rows(db, "hash=?", sha256(token))
+    if len(rows) != 1 { return }
+    cur := rows[0]
+    depth := 0
+    for depth < 16 {
+        if token_valid_row(cur) == false { chain = []TokRow{}  return }
+        chain = append(chain, cur)
+        if cur.parent == "" { return }
+        up := token_rows(db, "id=?", cur.parent)
+        if len(up) != 1 { chain = []TokRow{}  return }
+        cur = up[0]
+        depth = depth + 1
+    }
+    chain = []TokRow{}
+}
+
+// rate_take charges the whole chain, so minting children buys no extra budget.
+func rate_take(db, chain) (ok) {
+    ok = true
+    minute := now() / 60
+    sqlite_exec(db, "DELETE FROM rate WHERE minute < ?", []string{str(minute - 1)})
+    for _, t := range chain {
+        rows := parse(sqlite_query(db, "SELECT n FROM rate WHERE token_id=? AND minute=?", []string{t.id, str(minute)}), []CountRow{})
+        n := 0
+        if len(rows) == 1 { n = rows[0].n }
+        if n >= t.rate { ok = false }
+        sqlite_exec(db, "INSERT INTO rate(token_id,minute,n) VALUES(?,?,1) ON CONFLICT(token_id,minute) DO UPDATE SET n=n+1", []string{t.id, str(minute)})
+    }
+}
+
+func name_chars_ok(s) (ok) {
+    ok = len(s) > 0 && len(s) <= 200
+    allowed := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/"
+    i := 0
+    while i < len(s) {
+        if index(allowed, substr(s, i, i + 1)) < 0 { ok = false }
+        i = i + 1
+    }
+    if ok {
+        if has_prefix(s, "/") || has_suffix(s, "/") || contains(s, "//") { ok = false }
+    }
+}
+
+// A scope is "*", or a path: it covers itself and everything below it on a "/"
+// boundary ("app" covers "app/db" and never "apple").
+func scope_ok(s) (ok) {
+    ok = s == "*"
+    if ok { return }
+    t := s
+    if has_suffix(t, "/") { t = substr(t, 0, len(t) - 1) }
+    ok = name_chars_ok(t)
+}
+
+func scope_covers(scope, name) (ok) {
+    ok = scope == "*"
+    if ok { return }
+    base := scope
+    if has_suffix(base, "/") {
+        ok = has_prefix(name, base)
+        return
+    }
+    ok = name == base || has_prefix(name, base + "/")
+}
+
+// is every name covered by child also covered by parent?
+func scope_within(parent, child) (ok) {
+    ok = parent == "*" || parent == child
+    if ok { return }
+    if child == "*" { return }
+    p := parent
+    if has_suffix(p, "/") == false { p = p + "/" }
+    ok = has_prefix(child, p)
+}
+
+func latest_secret(db, name) (row, found) {
+    found = false
+    row = SecRow{name: "", version: 0, wiv: "", wdk: "", iv: "", ct: "", created: 0}
+    rows := parse(sqlite_query(db, "SELECT name,version,wiv,wdk,iv,ct,created FROM secrets WHERE name=? ORDER BY version DESC LIMIT 1", []string{name}), []SecRow{})
+    if len(rows) == 1 { row = rows[0]  found = true }
+}
+
+func secret_store(db, name, version, value) (ok) {
+    dek := rand_bytes(32)
+    tag := name + "|" + str(version)
+    wiv, wdk := aead_seal(master_bytes(), dek, "dek|" + tag)
+    iv, ct := aead_seal(dek, bytes(value), "val|" + tag)
+    ok = sqlite_exec(db, "INSERT INTO secrets(name,version,wiv,wdk,iv,ct,created) VALUES(?,?,?,?,?,?,?)", []string{name, str(version), wiv, wdk, iv, ct, str(now())}) == 0
+}
+
+func secret_open(row) (value, ok) {
+    value = ""
+    ok = false
+    tag := row.name + "|" + str(row.version)
+    dek := aead_open(master_bytes(), row.wiv, row.wdk, "dek|" + tag)
+    if len(dek) != 32 { return }
+    plain := aead_open(dek, row.iv, row.ct, "val|" + tag)
+    if len(plain) == 0 { return }
+    value = bytes_str(plain)
+    ok = true
+}
+
+func ap_mac_data(a) (s) { s = "ap|" + a.id + "|" + a.token_id + "|" + a.verb + "|" + a.target + "|" + a.digest + "|" + a.state + "|" + str(a.created) }
+
+func ap_rows(db, where, args_list) (rows) {
+    rows = parse(sqlite_query(db, "SELECT id,token_id,verb,target,digest,host,state,created,mac FROM approvals WHERE " + where, args_list), []ApRow{})
+}
+
+func ap_set_state(db, a, state) (ok) {
+    b := a
+    b.state = state
+    ok = sqlite_exec(db, "UPDATE approvals SET state=?, mac=? WHERE id=?", []string{state, mac_of(ap_mac_data(b)), a.id}) == 0
+}
+
+// approval_gate: consume a matching granted approval (single use), else return
+// the id of a pending request, creating it if needed. digest binds the approval
+// to the exact operation, so it cannot be spent on a different value.
+func approval_gate(db, token_id, verb, target, digest, host) (granted, id) {
+    granted = false
+    id = ""
+    oldest := str(now() - approval_ttl())
+    rows := ap_rows(db, "token_id=? AND verb=? AND target=? AND digest=? AND created>=? AND state<>'used' ORDER BY created DESC", []string{token_id, verb, target, digest, oldest})
+    for _, a := range rows {
+        if a.mac == mac_of(ap_mac_data(a)) {
+            if a.state == "approved" {
+                if ap_set_state(db, a, "used") { granted = true  id = a.id  return }
+            }
+            if a.state == "pending" { id = a.id }
+        }
+    }
+    if id != "" { return }
+    a := ApRow{id: new_id("ap_"), token_id: token_id, verb: verb, target: target, digest: digest, host: host, state: "pending", created: now(), mac: ""}
+    sqlite_exec(db, "INSERT INTO approvals(id,token_id,verb,target,digest,host,state,created,mac) VALUES(?,?,?,?,?,?,?,?,?)", []string{a.id, a.token_id, a.verb, a.target, a.digest, a.host, a.state, str(a.created), mac_of(ap_mac_data(a))})
+    id = a.id
+}
+
+func audit(db, token_id, kind, host, secret, verb, result) {
+    h := host
+    if len(h) > 64 { h = substr(h, 0, 64) }
+    s := secret
+    if len(s) > 200 { s = substr(s, 0, 200) }
+    sqlite_exec(db, "INSERT INTO audit(ts,token_id,kind,host,secret,verb,result) VALUES(?,?,?,?,?,?,?)", []string{str(now()), token_id, kind, h, s, verb, result})
+}

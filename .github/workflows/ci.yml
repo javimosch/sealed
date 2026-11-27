@@ -1,0 +1,16 @@
+name: ci
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev libssl-dev
+      - name: Install machin
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/javimosch/machin/main/install.sh | MACHIN_NO_SKILL=1 sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: ./build.sh
+      - run: python3 tests/test_sealed.py
