@@ -56,6 +56,7 @@ extern "gtk" {
     fn gtk_check_button_new_with_label(string) ptr
     fn gtk_toggle_button_new_with_label(string) ptr
     fn gtk_toggle_button_get_active(ptr) i32
+    fn gtk_toggle_button_set_active(ptr, i32)
     fn gtk_widget_set_sensitive(ptr, i32)
     fn gtk_widget_set_visible(ptr, i32)
     fn gtk_widget_get_visible(ptr) i32
@@ -165,15 +166,33 @@ func emit(entry) (code) {
     }
 }
 
-// tick returns -1 to keep waiting, else the exit code
-func tick(w, deadline) (code) {
+// inspect applies the current state, then acts on it: -1 keeps waiting, else
+// the exit code.
+func inspect(w) (code) {
     code = -1
-    pump()
     if gtk_widget_get_visible(w.win) == 0 { code = 1  return }
-    if gtk_toggle_button_get_active(w.cancel) != 0 || now_ms() > deadline { code = 1  return }
+    if gtk_toggle_button_get_active(w.cancel) != 0 { code = 1  return }
     ready := refresh(w)
-    // checked against the state just read, so OK cannot beat a later edit
-    if gtk_toggle_button_get_active(w.ok) != 0 && ready { code = emit(w.first) }
+    if gtk_toggle_button_get_active(w.ok) != 0 {
+        if ready {
+            code = emit(w.first)
+        } else {
+            // a refused press must not stay down and submit later by itself
+            gtk_toggle_button_set_active(w.ok, 0)
+        }
+    }
+}
+
+// tick inspects after EVERY event, never after a whole batch. Keys that queue up
+// while the process is busy then act as if typed slowly: a checkbox is applied
+// before the next key moves the focus, and OK is up to date before Enter.
+func tick(w, deadline) (code) {
+    code = inspect(w)
+    while code < 0 && gtk_events_pending() != 0 {
+        n := gtk_main_iteration_do(0)
+        code = inspect(w)
+    }
+    if code < 0 && now_ms() > deadline { code = 1 }
 }
 
 func main() {

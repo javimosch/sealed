@@ -3,7 +3,7 @@
 needs no test hooks. Needs libXtst and python3-gi (for the clipboard).
     xvfb-run -a /usr/bin/python3 tests/test_dialog.py [shots-dir]
 EXTRA=--timeout also waits out the 3 minute timeout."""
-import ctypes as C, os, subprocess, sys, time
+import ctypes as C, os, signal, subprocess, sys, time
 BIN = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sealed-dialog")
 SHOTS = sys.argv[1] if len(sys.argv) > 1 else None
 x = C.CDLL("libX11.so.6"); xt = C.CDLL("libXtst.so.6")
@@ -75,6 +75,16 @@ u = "pässwörd €ñ $x `y` \"q\""
 w = W(False); paste(u); key("Return"); r = w.done(); check("pasted unicode + symbols exact", r == (0, u.encode()), r)
 w = W(False); paste("line1\nline2"); key("Return"); r = w.done(); check("multi-line paste refused, nothing printed", r == (4, b""), r)
 w = W(False); paste("a" * 5000); key("Return"); r = w.done(); check("long paste not truncated", r == (0, b"a" * 5000), (r[0], len(r[1])))
+# Keys that queue up while the window is busy must act like keys typed slowly.
+# Stopping the process makes that happen every time.
+def while_stalled(w, keys):
+    time.sleep(0.3); w.p.send_signal(signal.SIGSTOP); keys(); time.sleep(0.2); w.p.send_signal(signal.SIGCONT); time.sleep(0.5)
+w = W(True); typ("fake-value"); tab(2); while_stalled(w, lambda: (key("space"), back_tab(), key("Return")))
+r = w.done(); check("queued: checkbox, Shift+Tab, Enter", r == (0, b"fake-value"), r)
+w = W(True); typ("abc"); tab(); typ("abc"); while_stalled(w, lambda: (key("BackSpace"), key("Return")))
+check("queued: Enter after an edit that breaks the match is refused", w.open())
+typ("c"); check("a refused Enter does not submit later by itself", w.open()); key("Return"); r = w.done(); check("a new Enter submits", r == (0, b"abc"), r)
+w = W(True); typ("abc"); tab(); typ("ab"); while_stalled(w, lambda: (typ("c"), key("Return"))); r = w.done(); check("queued: last repeat character, Enter", r == (0, b"abc"), r)
 # buttons: from the single field, tab order is checkbox, then the two buttons
 hit = []
 for n in (2, 3):

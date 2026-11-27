@@ -161,7 +161,9 @@ lines calling GTK 3 directly, with **no C file**. It builds to a second binary o
 about 23 kB that links GTK. Two things made that work:
 
 - **No FFI callbacks in machin yet**, so nothing is connected to a GTK signal. The
-  program runs the event loop itself and reads widget state every 20 ms. Buttons
+  program runs the event loop itself, applies the window's state after every event
+  and checks every 20 ms. (Handling a whole batch of events first was a bug: queued
+  keys acted on stale state.) Buttons
   are toggle buttons, so a click stays visible until it is read.
 - **What you type never becomes an MFL string.** `gtk_entry_get_text` is declared
   as returning a `ptr`; C functions compare, scan and print GTK's own buffer. GTK

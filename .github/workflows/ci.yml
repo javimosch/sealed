@@ -10,7 +10,11 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev libssl-dev libgtk-3-dev pkg-config xvfb libxtst6 python3-gi gir1.2-gtk-3.0
       - name: Install machin
         run: |
-          curl -fsSL https://raw.githubusercontent.com/javimosch/machin/main/install.sh | MACHIN_NO_SKILL=1 sh
+          # a direct, pinned download: no release lookup to be rate limited, and
+          # a new machin release cannot change what is tested
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL --retry 3 -o "$HOME/.local/bin/machin" https://github.com/javimosch/machin/releases/download/v0.146.0/machin-v0.146.0-linux-amd64
+          chmod +x "$HOME/.local/bin/machin"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: ./build.sh
       - run: python3 tests/test_sealed.py

@@ -16,6 +16,9 @@ an agent that is deliberately trying to get a secret.
 - **machin 0.146.0 or later is required**, and `build.sh` checks it.
 
 ### Fixed
+- The new window applies its state after every event. Without this (found by CI
+  before the release), keys queued while it was busy could leave Enter ignored, or
+  leave OK pressed so that it submitted later by itself.
 - With machin 0.146.0, which copies strings returned by C, the C shim would have
   left unfreed, unwiped copies of typed and piped values. It now returns one
   buffer and wipes it.
