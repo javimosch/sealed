@@ -1,6 +1,6 @@
 // spec: help-json, guide, feedback, update, install/uninstall, daemon.
 
-func app_version() (v) { v = "0.3.0" }
+func app_version() (v) { v = "0.3.1" }
 
 func help_json() (s) {
     s = "{\"version\":" + json(app_version()) + ",\"output\":\"json\",\"commands\":{" +
@@ -25,7 +25,7 @@ func help_json() (s) {
         "\"update\":{\"flags\":[\"--check\",\"--force\"]}," +
         "\"install\":{\"flags\":[\"--prefix DIR\"]},\"uninstall\":{\"flags\":[\"--prefix DIR\"]}}," +
         "\"global_flags\":[\"--json\",\"--db FILE\",\"--host\",\"--port\",\"--no-interactive\"]," +
-        "\"exit_codes\":{\"0\":\"success\",\"3\":\"daemon status: stopped\",\"5\":\"update --check: update available\",\"80\":\"invalid_args\",\"82\":\"validation\",\"83\":\"forbidden_kind\",\"85\":\"approval_required\",\"86\":\"locked\",\"87\":\"forbidden_scope\",\"89\":\"bad_passphrase\",\"90\":\"not_authenticated or permission\",\"92\":\"not_found\",\"93\":\"no_dialog\",\"95\":\"conflict\",\"100\":\"daemon_unreachable or integration\",\"101\":\"rate_limited\",\"110\":\"internal\"}," +
+        "\"exit_codes\":{\"0\":\"success\",\"3\":\"daemon status: stopped\",\"5\":\"update --check: update available\",\"80\":\"invalid_args\",\"82\":\"validation\",\"83\":\"forbidden_kind\",\"85\":\"approval_required\",\"86\":\"locked\",\"87\":\"forbidden_scope\",\"89\":\"bad_passphrase\",\"90\":\"not_authenticated or permission\",\"92\":\"not_found\",\"93\":\"no_dialog: relay the suggestions to the human\",\"95\":\"conflict\",\"100\":\"daemon_unreachable or integration\",\"101\":\"rate_limited\",\"110\":\"internal\"}," +
         "\"env\":[\"SEALED_TOKEN\",\"SEALED_TOKEN_FILE\",\"SEALED_HOME\",\"SEALED_DB\",\"SEALED_HOST\",\"SEALED_PORT\",\"SEALED_URL\",\"SEALED_ALLOW_PLAINTEXT\",\"SEALED_HOST_LABEL\",\"SEALED_SERVER\",\"SEALED_DIALOG\",\"FEEDBACK_RELAY\"]," +
         "\"see_also\":[\"sealed guide\"]}"
 }
@@ -53,7 +53,7 @@ func guide_body() (g) {
     g = GuideBody{sealed: "a secret store agents can use without having to read it",
         one_liner: "Encrypted secrets behind a local daemon: run commands with secrets injected and output redacted, with scopes, human approvals and an audit log.",
         model: model,
-        loop: []string{"your token comes from SEALED_TOKEN, or the file named by SEALED_TOKEN_FILE: use the agent token you were given", "sealed status (exit 100: no daemon, run sealed daemon start; if the store was never initialised a human must run: sealed init)", "sealed status (if locked: on a desktop run sealed unlock --dialog when the human expects it, else ask them to run: sealed unlock)", "sealed ls", "missing a secret? sealed request path --reason \"why\" (never ask for the value in chat)", "sealed exec --env NAME=path -- cmd", "on exit 85, ask the human to run the suggested `sealed approve <id>`, then re-run the same command"},
+        loop: []string{"your token comes from SEALED_TOKEN, or the file named by SEALED_TOKEN_FILE: use the agent token you were given", "sealed status (exit 100: no daemon, run sealed daemon start; if the store was never initialised a human must run: sealed init)", "sealed status (if locked: on a desktop run sealed unlock --dialog when the human expects it, else ask them to run: sealed unlock)", "sealed ls", "missing a secret? sealed request path --reason \"why\" (never ask for the value in chat)", "request exits 93 (no desktop or window program, e.g. headless): show the human the exact command sealed put path, for their OWN terminal against the same daemon; wait for their reply; check sealed ls path lists it; continue. Never ask for the value, never run that put yourself in a terminal you can read", "sealed exec --env NAME=path -- cmd", "on exit 85, ask the human to run the suggested `sealed approve <id>`, then re-run the same command"},
         concepts: concepts,
         commands: commands,
         examples: []Example{Example{goal: "call an API with a key you never read", do: []string{"sealed exec --env API_KEY=svc/api-key -- ./call-api.sh"}},
@@ -63,6 +63,8 @@ func guide_body() (g) {
             Example{goal: "store a new secret from a script", do: []string{"printf %s \"$VALUE\" | sealed put svc/api-key"}},
             Example{goal: "mint a narrow agent token", do: []string{"sealed token create --kind agent --scope svc/ --rate 30"}}},
         gotchas: []string{
+            "exit 93 comes after the daemon checked that the name is free and in scope. Unlike request, put CAN replace a secret (after approval): if it exists when you check, use it, do not ask to replace it. A different daemon or SEALED_URL means a different store.",
+            "headless unlock: unlock --dialog cannot work; a human runs sealed unlock in their own terminal on the daemon's machine, for example over their own SSH session. Needed again after every daemon restart.",
             "WITHOUT SEALED_TOKEN or SEALED_TOKEN_FILE, sealed uses ~/.sealed/token, the human token that covers EVERY secret. An agent must set its own token; if it was given none, ask the human. A scoped token does not stop a same-user process from reading that file.",
             "feedback sends your message to a remote relay (FEEDBACK_RELAY, off to disable). Masking cannot catch a short plain-word secret: never put one in a message.",
             "SECURITY LIMIT: sealed prevents accidental disclosure. It is NOT a boundary against a hostile process running as your user: an agent token can obtain any in-scope value (render, exec with a command that transforms the value, or calling the daemon API directly). Scope tokens narrowly.",

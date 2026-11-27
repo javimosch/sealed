@@ -3,6 +3,16 @@
 `sealed` is experimental, has had no independent security audit, and does not stop
 an agent that is deliberately trying to get a secret.
 
+## 0.3.1 — 2026-11-27
+
+### Changed
+- `request` asks the daemon about the name before checking for a desktop. Without
+  a daemon, locked, out of scope or already existing, you now get that error rather
+  than exit 93.
+- Exit 93 suggests the whole fallback: which command a person runs, where, never to
+  ask for the value, and how to check the result.
+- `guide` and the README explain headless use, including that `put` can replace.
+
 ## 0.3.0 — 2026-11-27
 
 ### Changed

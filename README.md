@@ -35,13 +35,30 @@ checkbox, unchecked by default; only the person at the window can tick it.
 - never asks for your passphrase, and the window says not to type it;
 - one window at a time; cancel or 3 minutes without an answer stores nothing (give
   the command a timeout of at least 4 minutes);
-- needs a desktop session and `sealed-dialog` (GTK 3) next to `sealed`. Otherwise it exits 93 and suggests
+- needs a desktop session and `sealed-dialog` (GTK 3) next to `sealed`; without
+  them it exits 93 (see below). Otherwise it exits 93 and suggests
   `sealed put`. Multi-line values must come from a file.
 
 This keeps the value out of the chat, **not out of the agent's reach**: the same
 token can use it with `exec`. A program on your desktop can fake such a window or
 record your typing, so only enter values you expected to be asked for. "Stored"
 does not prove that a person typed the value.
+
+### Without a desktop
+
+`request` first asks the daemon whether the name is free and covered by the token.
+Then, if no window can be opened, it exits 93 with suggestions for the agent:
+
+1. show you the exact command, `sealed put <name>`, **without asking for the value**;
+2. you run it in **your own terminal**, against the same daemon (another daemon or
+   `SEALED_URL` is another store);
+3. you reply; the agent checks that `sealed ls <name>` lists it, and continues.
+
+Unlike `request`, `put` can replace a secret, after approval. If the secret exists
+by the time the agent checks, it should use it, not ask to replace it. To unlock,
+run `sealed unlock` in your own terminal on the daemon's machine, for example over
+your own SSH session; this is needed after every daemon restart. Remote use has
+not been tested.
 
 ### Unlock from a desktop window
 
