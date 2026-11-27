@@ -28,7 +28,8 @@ extern "sh" {
     fn sh_write_private(string, string) int
     fn sh_private_dir(string) int
     fn sh_chmod(string, int) int
-    fn sh_install_self(string) int
+    fn sh_copy_program(string, string) int
+    fn sh_scrub() int
     fn sh_self_path() string
     fn sh_arg(string) int
     fn sh_env(string, string, int) int
@@ -95,7 +96,7 @@ func aead_open(key, iv_b64, ct_b64, aad) (plain) {
     plain = aes_gcm_decrypt(key, base64_decode_bytes(iv_b64), base64_decode_bytes(ct_b64), bytes(aad))
 }
 
-// from_hex consumes the shim buffer immediately, making no extra string copy
+// MFL copies the hex string into the current arena (released, not zeroed)
 func master_bytes() (k) { k = from_hex(sh_key_get()) }
 
 func mac_of(data) (m) {

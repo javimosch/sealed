@@ -1,6 +1,6 @@
 // spec: help-json, guide, feedback, update, install/uninstall, daemon.
 
-func app_version() (v) { v = "0.2.0" }
+func app_version() (v) { v = "0.3.0" }
 
 func help_json() (s) {
     s = "{\"version\":" + json(app_version()) + ",\"output\":\"json\",\"commands\":{" +
@@ -73,7 +73,7 @@ func guide_body() (g) {
             "--file paths are removed when the command ends; SIGKILL of sealed itself leaves them in $XDG_RUNTIME_DIR or /dev/shm",
             "the audit host column is self-reported by the client",
             "one writer only; replication and read-only failover are not implemented yet",
-            "request waits up to 3 minutes per window, creates new secrets only, and needs a desktop with GTK 3 (python3-gi); every window has a Show what I type checkbox, off by default; run it with a timeout of at least 4 minutes",
+            "request waits up to 3 minutes per window, creates new secrets only, and needs a desktop and the sealed-dialog program (GTK 3) installed next to sealed; every window has a Show what I type checkbox, off by default; run it with a timeout of at least 4 minutes",
             "request keeps the value out of chat, not out of reach: the same token can use it with exec, and \"stored\" does not prove a human typed it",
             "unlock --dialog asks for the master password in a desktop window; any program can imitate such a window, so terminal unlock is the more careful choice",
             "no telemetry: nothing is sent unless you run feedback or configure update"},
@@ -160,7 +160,7 @@ func cmd_feedback(o, message, kind, context) {
 // ---- self update ----
 type VersionInfo struct { ok bool  version string  download string  sha256 string }
 
-func self_sha() (h) { h = to_hex(sha256_bytes(read_file_bytes("" + sh_self_path()))) }
+func self_sha() (h) { h = to_hex(sha256_bytes(read_file_bytes(sh_self_path()))) }
 
 func run_argv(argv) (code) {
     for _, a := range argv { sh_arg(a) }
@@ -186,7 +186,7 @@ func cmd_update(check_only, force) {
     url := info.download
     if has_prefix(url, "/") { url = server + url }
     if has_prefix(url, server + "/") == false { die(100, "update_rejected", "download URL leaves the update server", []string{}) }
-    target := "" + sh_self_path()
+    target := sh_self_path()
     staged := target + ".new-" + to_hex(rand_bytes(4))
     if run_argv([]string{"curl", "-fsS", "--max-time", "60", "-o", staged, url}) != 0 { remove(staged)  die(100, "update_rejected", "download failed", []string{}) }
     if to_hex(sha256_bytes(read_file_bytes(staged))) != info.sha256 { remove(staged)  die(100, "update_rejected", "sha256 mismatch", []string{}) }
@@ -199,18 +199,43 @@ func cmd_update(check_only, force) {
     println("{\"ok\":true,\"updated\":true,\"from\":" + json(local) + ",\"to\":" + json(info.version) + "}")
 }
 
+// install places sealed and, when it was built, the sealed-dialog window program
 func cmd_install(prefix, removing) {
     dir := prefix
     if dir == "" { dir = env("HOME") + "/.local/bin" }
     dst := dir + "/sealed"
+    window_dst := dir + "/sealed-dialog"
     if removing {
-        if sh_exists(dst) == 0 { println("{\"ok\":true,\"removed\":false,\"path\":" + json(dst) + "}")  return }
-        if remove(dst) != 0 { die(90, "permission_denied", "cannot remove " + dst, []string{}) }
-        println("{\"ok\":true,\"removed\":true,\"path\":" + json(dst) + "}")
+        had := sh_exists(dst) == 1
+        for _, f := range []string{dst, window_dst} {
+            if sh_exists(f) == 1 && remove(f) != 0 { die(90, "permission_denied", "cannot remove " + f, []string{}) }
+        }
+        removed := "false"
+        if had { removed = "true" }
+        println("{\"ok\":true,\"removed\":" + removed + ",\"path\":" + json(dst) + "}")
         return
     }
-    if run_argv([]string{"mkdir", "-p", dir}) != 0 || sh_install_self(dst) != 0 { die(90, "permission_denied", "cannot write " + dst, []string{"sealed install --prefix <writable dir>"}) }
-    println("{\"ok\":true,\"installed\":" + json(dst) + "}")
+    self := sh_self_path()
+    window_src := substr(self, 0, last_slash(self)) + "/sealed-dialog"
+    if run_argv([]string{"mkdir", "-p", dir}) != 0 || sh_copy_program("/proc/self/exe", dst) != 0 { die(90, "permission_denied", "cannot write " + dst, []string{"sealed install --prefix <writable dir>"}) }
+    placed := "null"
+    if sh_exists(window_src) == 1 {
+        if sh_copy_program(window_src, window_dst) != 0 { die(90, "permission_denied", "cannot write " + window_dst, []string{"sealed install --prefix <writable dir>"}) }
+        placed = json(window_dst)
+    } else {
+        // an older window program beside a newer sealed would be a surprise
+        if sh_exists(window_dst) == 1 && remove(window_dst) != 0 { die(90, "permission_denied", "cannot remove " + window_dst, []string{}) }
+    }
+    println("{\"ok\":true,\"installed\":" + json(dst) + ",\"dialog\":" + placed + "}")
+}
+
+func last_slash(s) (at) {
+    at = 0
+    i := 0
+    while i < len(s) {
+        if substr(s, i, i + 1) == "/" { at = i }
+        i = i + 1
+    }
 }
 
 // ---- daemon lifecycle (cli-daemon-spec) ----
@@ -255,7 +280,7 @@ func cmd_daemon(o, action) {
         if healthy(o) { println("{\"ok\":true,\"daemon\":\"already_running\"" + where + "}")  return }
         ensure_home()
         log := home_dir() + "/serve.log"
-        for _, a := range []string{"" + sh_self_path(), "serve", "--host", o.host, "--port", str(o.port), "--db", o.db} { sh_arg(a) }
+        for _, a := range []string{sh_self_path(), "serve", "--host", o.host, "--port", str(o.port), "--db", o.db} { sh_arg(a) }
         sh_spawn_detached(log)
         i := 0
         while i < 50 {

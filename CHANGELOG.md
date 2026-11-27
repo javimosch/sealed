@@ -3,6 +3,27 @@
 `sealed` is experimental, has had no independent security audit, and does not stop
 an agent that is deliberately trying to get a secret.
 
+## 0.3.0 — 2026-11-27
+
+### Changed
+- The desktop window is now written in MFL (`src/dialog.src`), calling GTK 3
+  directly, in place of the embedded Python script. Python is no longer needed to
+  build or run `sealed`.
+- It is a second program, `sealed-dialog`, which `sealed` looks for only in its
+  own directory. `install` and `uninstall` handle both; `update` replaces only
+  `sealed`.
+- What is typed in a window never becomes an MFL string.
+- **machin 0.146.0 or later is required**, and `build.sh` checks it.
+
+### Fixed
+- With machin 0.146.0, which copies strings returned by C, the C shim would have
+  left unfreed, unwiped copies of typed and piped values. It now returns one
+  buffer and wipes it.
+
+### Upgrading
+Install GTK 3 development files (`libgtk-3-dev`) for the windows, rebuild, and run
+`./sealed install` again so both programs are placed together.
+
 ## 0.2.0 — 2026-11-27
 
 ### Added

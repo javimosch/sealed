@@ -46,7 +46,7 @@ $ sealed exec --env API_KEY=demo/api-key -- sh -c 'printf %s "$API_KEY" | rev'
 
 <h2>Ask for a secret without pasting it into chat</h2>
 <pre>$ sealed request github/token --reason "to open pull requests"</pre>
-<p>The agent runs it. A desktop window says <strong>“Enter value for secret github/token”</strong>, you paste the value, and the agent only learns that it was stored. New secrets only; it never asks for your passphrase. It keeps the value out of the chat, <strong>not out of the agent’s reach</strong>: the same token can use it. Needs a desktop with GTK 3; the window (about 100 lines of Python) has a “Show what I type” checkbox, off by default.</p>
+<p>The agent runs it. A desktop window says <strong>“Enter value for secret github/token”</strong>, you paste the value, and the agent only learns that it was stored. New secrets only; it never asks for your passphrase. It keeps the value out of the chat, <strong>not out of the agent’s reach</strong>: the same token can use it. Needs a desktop with GTK 3. The window has a “Show what I type” checkbox, off by default.</p>
 
 <h2>What it helps with</h2>
 <ul>
@@ -62,16 +62,17 @@ $ sealed exec --env API_KEY=demo/api-key -- sh -c 'printf %s "$API_KEY" | rev'
 
 <h2>What it shows about machin</h2>
 <ul class="stats">
-<li><b>~1,600</b>lines of MFL</li>
+<li><b>~1,700</b>lines of MFL</li>
 <li><b>~400</b>lines of C</li>
-<li><b>~220 kB</b>stripped binary</li>
-<li><b>&lt; 3 s</b>build, on the development machine</li>
+<li><b>~220 kB</b>main binary, stripped</li>
+<li><b>~23 kB</b>window program, stripped</li>
 </ul>
-<p>One program is both the command-line tool and the daemon. machin's built-ins provide Argon2id, AES-256-GCM, HKDF, HMAC, SQLite, sockets, an HTTP client and JSON. The binary links dynamically to glibc, OpenSSL and SQLite.</p>
-<p><strong>Not everything is MFL.</strong> Hidden terminal input, running commands, redaction, the desktop dialog, temporary files, locked memory and process hardening are in <a href="https://github.com/javimosch/sealed/blob/main/src/shim.h">a C shim</a>. It is the most security-sensitive code, so review it first.</p>
+<p>One program is both the command-line tool and the daemon. machin's built-ins provide Argon2id, AES-256-GCM, HKDF, HMAC, SQLite, sockets, an HTTP client and JSON. The main binary links dynamically to glibc, OpenSSL and SQLite, not GTK.</p>
+<p><strong>The desktop window is MFL too:</strong> about 200 lines calling GTK 3 directly, with no C file. machin has no FFI callbacks yet, so the program checks the window’s state itself every 20 ms. What you type never becomes an MFL string.</p>
+<p><strong>The main program is not all MFL.</strong> Hidden terminal input, running commands, redaction, temporary files, locked memory and process hardening are in <a href="https://github.com/javimosch/sealed/blob/main/src/shim.h">a C shim</a>. It is the most security-sensitive code, so review it first.</p>
 
 <h2>Try it with a fake secret</h2>
-<p>Linux x86_64, with <a href="https://github.com/javimosch/machin">machin</a>, a C compiler, and the SQLite and OpenSSL 3 development packages.</p>
+<p>Linux x86_64, with <a href="https://github.com/javimosch/machin">machin</a>, (0.146.0 or later), a C compiler, and the SQLite and OpenSSL 3 development packages. The desktop windows also need the GTK 3 development files.</p>
 <pre>git clone https://github.com/javimosch/sealed
 cd sealed
 ./scripts/demo.sh   <span class="c"># throwaway store; you choose a throwaway passphrase</span></pre>

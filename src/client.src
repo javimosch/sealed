@@ -64,7 +64,16 @@ func call_or_exit(o, op, q) (body) {
 
 func can_prompt(o) (yes) { yes = o.interactive && sh_has_tty() == 1 }
 
-func ask_passphrase(prompt) (p) { p = "" + sh_tty_secret(prompt) }
+func ask_passphrase(prompt) (p) {
+    p = sh_tty_secret(prompt)
+    sh_scrub()
+}
+
+// one desktop window; the C buffer is wiped as soon as MFL has its copy
+func window(title, heading, body, confirm) (v) {
+    v = sh_dialog(title, heading, body, confirm)
+    sh_scrub()
+}
 
 // call_privileged: if the daemon says approval is required and this is a human
 // token at a terminal, ask for the passphrase and retry once.
@@ -110,9 +119,9 @@ func dialog_value(name, reason) (value) {
     claim := ""
     if reason != "" { claim = "Reason given by the requester (not verified):\n\"" + reason + "\"\n\n" }
     note := "This creates a NEW secret. Do NOT type your sealed master password here.\nIf you did not expect this window, press Cancel."
-    value = "" + sh_dialog("sealed: enter a value", "Enter value for secret  " + name, claim + note, 1)
+    value = window("sealed: enter a value", "Enter value for secret  " + name, claim + note, 1)
     st := sh_dialog_status()
-    if st == 3 { die(93, "no_dialog", "cannot open the desktop window (needs GTK 3 and python3-gi)", []string{"ask human to run: sealed put " + name}) }
+    if st == 3 { die(93, "no_dialog", "cannot open the desktop window (is sealed-dialog installed next to sealed, with GTK 3 and a display?)", []string{"ask human to run: sealed put " + name}) }
     if st == 4 { die(82, "validation", "too long or multi-line; nothing was stored", []string{"ask human to run: sealed put " + name + " < file"}) }
     if st != 0 { nothing_stored(name, "cancelled or timed out") }
     if value == "" { nothing_stored(name, "empty value") }
@@ -301,17 +310,20 @@ func cmd_render(o, tpl_path, out_path) {
 func put_value(o, name) (value) {
     from_file := "sealed put " + name + " < file"
     if sh_stdin_is_tty() == 1 && can_prompt(o) {
-        value = "" + sh_tty_value("value for " + name + " (hidden; paste, then Enter): ")
+        value = sh_tty_value("value for " + name + " (hidden; paste, then Enter): ")
+        sh_scrub()
         st := sh_tty_value_status()
         if st == 1 { die(82, "validation", "too long to paste at a prompt; nothing was stored", []string{from_file}) }
         if st == 2 || has_prefix(value, "-----BEGIN") { die(82, "validation", "multi-line value; nothing was stored", []string{from_file}) }
         if value == "" { die(82, "validation", "empty value; nothing was stored", []string{}) }
         // input is hidden: a second entry catches typos and bad pastes
-        again := "" + sh_tty_value("repeat the value to confirm: ")
+        again := sh_tty_value("repeat the value to confirm: ")
+        sh_scrub()
         if sh_tty_value_status() != 0 || again != value { die(82, "validation", "values do not match; nothing was stored", []string{}) }
         return
     }
-    value = "" + sh_stdin_value()
+    value = sh_stdin_value()
+    sh_scrub()
     st := sh_stdin_status()
     if st == 1 { die(82, "validation", "value contains a NUL byte; binary values are not supported", []string{"base64-encode it first"}) }
     if st == 2 { die(82, "validation", "value exceeds 64 KiB", []string{}) }
@@ -374,9 +386,9 @@ func cmd_unlock_dialog(o) {
     state := call_or_exit(o, "status", new_req())
     if contains(state, "\"locked\":false") { println("{\"ok\":true,\"locked\":false,\"already\":true}")  return }
     q := new_req()
-    q.passphrase = "" + sh_dialog("sealed: unlock", "Enter sealed master password to UNLOCK", "Daemon: " + clean_reason(base_url(o)) + "\nUnlocking lets every valid token use its secrets until you lock or restart.\nIf you did not expect this window, press Cancel.", 0)
+    q.passphrase = window("sealed: unlock", "Enter sealed master password to UNLOCK", "Daemon: " + clean_reason(base_url(o)) + "\nUnlocking lets every valid token use its secrets until you lock or restart.\nIf you did not expect this window, press Cancel.", 0)
     st := sh_dialog_status()
-    if st == 3 { die(93, "no_dialog", "cannot open the desktop window (needs GTK 3 and python3-gi)", []string{fallback}) }
+    if st == 3 { die(93, "no_dialog", "cannot open the desktop window (is sealed-dialog installed next to sealed, with GTK 3 and a display?)", []string{fallback}) }
     if st != 0 || q.passphrase == "" { die(85, "cancelled", "cancelled, timed out or empty; still locked", []string{fallback}) }
     println(call_or_exit(o, "unlock", q))
 }

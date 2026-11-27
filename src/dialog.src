@@ -1,0 +1,195 @@
+// sealed-dialog: the desktop window, in MFL, calling GTK 3 directly. No C file.
+// A separate program, so that sealed itself never links GTK.
+// argv: title heading body confirm(0|1)
+// stdout: what was typed. exit 0 entered, 1 cancelled/timed out, 3 no display
+// or bad arguments, 4 multi-line input.
+//
+// MFL has no FFI callbacks yet, so nothing is connected to a GTK signal: this
+// program runs the event loop itself and reads widget state each tick.
+// OK and Cancel are toggle buttons, so a click stays visible until read.
+//
+// What is typed never becomes an MFL string. gtk_entry_get_text is declared as
+// returning a ptr: C functions compare, scan and print GTK's own buffer, so no
+// copy is left in MFL memory.
+
+extern "prctl" { header "sys/prctl.h" fn prctl(i32, int, int, int, int) i32 }
+
+extern "gtk" {
+    header "gtk/gtk.h"
+    link "gtk-3"
+    link "gdk-3"
+    link "gobject-2.0"
+    link "glib-2.0"
+    link "pango-1.0"
+    fn gtk_init_check(ptr, ptr) i32
+    fn gtk_events_pending() i32
+    fn gtk_main_iteration_do(i32) i32
+    fn gtk_dialog_new() ptr
+    fn gtk_dialog_get_content_area(ptr) ptr
+    fn gtk_window_set_title(ptr, string)
+    fn gtk_window_set_default_size(ptr, i32, i32)
+    fn gtk_window_set_position(ptr, i32)
+    fn gtk_window_set_keep_above(ptr, i32)
+    fn gtk_window_set_default(ptr, ptr)
+    fn gtk_window_present(ptr)
+    fn gtk_box_new(i32, i32) ptr
+    fn gtk_box_set_spacing(ptr, i32)
+    fn gtk_box_pack_start(ptr, ptr, i32, i32, u32)
+    fn gtk_box_pack_end(ptr, ptr, i32, i32, u32)
+    fn gtk_container_set_border_width(ptr, u32)
+    fn gtk_label_new(string) ptr
+    fn gtk_label_set_text(ptr, string)
+    fn gtk_label_set_xalign(ptr, f32)
+    fn gtk_label_set_line_wrap(ptr, i32)
+    fn gtk_label_set_max_width_chars(ptr, i32)
+    fn gtk_label_set_attributes(ptr, ptr)
+    fn pango_attr_list_new() ptr
+    fn pango_attr_weight_new(i32) ptr
+    fn pango_attr_list_insert(ptr, ptr)
+    fn gtk_entry_new() ptr
+    fn gtk_entry_get_text(ptr) ptr
+    fn gtk_entry_get_text_length(ptr) u16
+    fn gtk_entry_set_visibility(ptr, i32)
+    fn gtk_entry_set_input_purpose(ptr, i32)
+    fn gtk_entry_set_placeholder_text(ptr, string)
+    fn gtk_entry_set_activates_default(ptr, i32)
+    fn gtk_check_button_new_with_label(string) ptr
+    fn gtk_toggle_button_new_with_label(string) ptr
+    fn gtk_toggle_button_get_active(ptr) i32
+    fn gtk_widget_set_sensitive(ptr, i32)
+    fn gtk_widget_set_visible(ptr, i32)
+    fn gtk_widget_get_visible(ptr) i32
+    fn gtk_widget_set_can_default(ptr, i32)
+    fn gtk_widget_set_size_request(ptr, i32, i32)
+    fn gtk_widget_grab_focus(ptr)
+    fn gtk_widget_show_all(ptr)
+    fn gtk_widget_destroy(ptr)
+    fn gtk_widget_get_style_context(ptr) ptr
+    fn gtk_style_context_add_class(ptr, string)
+    fn g_object_ref(ptr) ptr
+    fn g_strcmp0(ptr, ptr) i32
+}
+
+extern "libc" { header "string.h" header "stdio.h" fn strchr(ptr, i32) ptr fn dprintf(i32, string, ptr) i32 }
+
+type Win struct { win int  first int  again int  show int  ok int  cancel int  note int }
+
+func label(box, text) (w) {
+    w = gtk_label_new(text)   // plain text, never markup
+    gtk_label_set_xalign(w, 0.0)
+    gtk_label_set_line_wrap(w, 1)
+    gtk_label_set_max_width_chars(w, 64)
+    gtk_box_pack_start(box, w, 0, 0, 0)
+}
+
+func field(box, hint) (e) {
+    e = gtk_entry_new()
+    gtk_entry_set_visibility(e, 0)
+    gtk_entry_set_input_purpose(e, 8)   // GTK_INPUT_PURPOSE_PASSWORD
+    gtk_entry_set_placeholder_text(e, hint)
+    gtk_entry_set_activates_default(e, 1)
+    gtk_box_pack_start(box, e, 0, 0, 0)
+}
+
+func button(row, text) (b) {
+    b = gtk_toggle_button_new_with_label(text)
+    gtk_widget_set_size_request(b, 86, -1)
+    gtk_box_pack_end(row, b, 0, 0, 0)
+}
+
+func build(title, heading, body, confirm) (w) {
+    win := gtk_dialog_new()   // a GtkDialog closes on Escape by itself
+    t := g_object_ref(win)    // stays valid to query after the window is closed
+    gtk_window_set_title(win, title)
+    gtk_window_set_default_size(win, 560, -1)
+    gtk_window_set_position(win, 1)
+    gtk_window_set_keep_above(win, 1)
+    box := gtk_dialog_get_content_area(win)
+    gtk_box_set_spacing(box, 8)
+    gtk_container_set_border_width(box, 14)
+    head := label(box, heading)
+    bold := pango_attr_list_new()
+    pango_attr_list_insert(bold, pango_attr_weight_new(700))
+    gtk_label_set_attributes(head, bold)
+    info := label(box, body)
+    first := field(box, "type or paste here")
+    again := 0
+    if confirm { again = field(box, "repeat to confirm") }
+    show := gtk_check_button_new_with_label("Show what I type")   // unchecked
+    gtk_box_pack_start(box, show, 0, 0, 0)
+    note := label(box, "")
+    row := gtk_box_new(0, 6)
+    gtk_box_pack_start(box, row, 0, 0, 0)
+    ok := button(row, "OK")
+    cancel := button(row, "Cancel")
+    gtk_style_context_add_class(gtk_widget_get_style_context(ok), "suggested-action")
+    gtk_widget_set_can_default(ok, 1)
+    gtk_window_set_default(win, ok)
+    gtk_widget_show_all(win)
+    gtk_widget_grab_focus(first)
+    w = Win{win: win, first: first, again: again, show: show, ok: ok, cancel: cancel, note: note}
+}
+
+// refresh applies the current state and reports whether OK may be pressed.
+func refresh(w) (ready) {
+    visible := gtk_toggle_button_get_active(w.show)
+    gtk_entry_set_visibility(w.first, visible)
+    ready = gtk_entry_get_text_length(w.first) != 0
+    message := ""
+    if w.again != 0 {
+        gtk_entry_set_visibility(w.again, visible)
+        gtk_widget_set_visible(w.again, 1 - visible)   // a visible value needs no repeat
+        if visible == 0 {
+            same := g_strcmp0(gtk_entry_get_text(w.first), gtk_entry_get_text(w.again)) == 0
+            if gtk_entry_get_text_length(w.again) != 0 && same == false { message = "The two entries do not match." }
+            ready = ready && same
+        }
+    }
+    gtk_label_set_text(w.note, message)
+    s := 0
+    if ready { s = 1 }
+    gtk_widget_set_sensitive(w.ok, s)
+}
+
+func pump() {
+    while gtk_events_pending() != 0 { n := gtk_main_iteration_do(0) }
+}
+
+// emit prints GTK's buffer to stdout, unless it holds a line break
+func emit(entry) (code) {
+    text := gtk_entry_get_text(entry)
+    code = 4
+    if strchr(text, 10) == 0 && strchr(text, 13) == 0 {
+        n := dprintf(1, "%s", text)
+        code = 0
+    }
+}
+
+// tick returns -1 to keep waiting, else the exit code
+func tick(w, deadline) (code) {
+    code = -1
+    pump()
+    if gtk_widget_get_visible(w.win) == 0 { code = 1  return }
+    if gtk_toggle_button_get_active(w.cancel) != 0 || now_ms() > deadline { code = 1  return }
+    ready := refresh(w)
+    // checked against the state just read, so OK cannot beat a later edit
+    if gtk_toggle_button_get_active(w.ok) != 0 && ready { code = emit(w.first) }
+}
+
+func main() {
+    a := args()
+    if len(a) != 5 { exit(3) }
+    h := prctl(4, 0, 0, 0, 0)   // PR_SET_DUMPABLE = 0
+    if gtk_init_check(0, 0) == 0 { exit(3) }
+    w := build(a[1], a[2], a[3], a[4] == "1")
+    gtk_window_present(w.win)
+    deadline := now_ms() + 180000
+    done := -1
+    while done < 0 {
+        arena { done = tick(w, deadline) }
+        if done < 0 { sleep(20) }
+    }
+    gtk_widget_destroy(w.win)
+    pump()
+    exit(done)
+}

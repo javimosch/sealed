@@ -1,6 +1,7 @@
-/* sealed: the parts MFL has no builtin for. Strings returned to MFL are fresh
- * heap copies (MFL does not copy an FFI string), except sh_key_get. Callers
- * concatenate "" to move them into the arena. */
+/* sealed: the parts MFL has no builtin for.
+ * Needs machin 0.146.0+, which copies every string an extern returns. So what
+ * is returned here is one reusable buffer, never a heap copy (it would leak),
+ * and MFL calls sh_scrub() right after taking a sensitive value. */
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -18,7 +19,12 @@
 #include <sys/resource.h>
 #include <sys/file.h>
 
-static char* sh_dup(const char* s) { char* d = strdup(s ? s : ""); if (!d) abort(); return d; }
+static char* sh_dup(const char* s) { char* d = strdup(s ? s : ""); if (!d) abort(); return d; }  /* C-owned only */
+
+#define SH_OUT 65538
+static char sh_out[SH_OUT];
+static long long sh_scrub(void) { explicit_bzero(sh_out, sizeof sh_out); return 0; }
+static char* sh_give(const char* s) { sh_scrub(); strncpy(sh_out, s, sizeof sh_out - 1); return sh_out; }
 
 /* No core dumps, no ptrace / /proc/<pid>/mem from non-root peers. */
 static mode_t sh_umask = 022;
@@ -43,8 +49,8 @@ static long long sh_key_set(const char* hex) {
     return 0;
 }
 static long long sh_key_present(void) { return sh_key[0] != 0; }
-/* One reusable buffer, not a heap copy per call: MFL does not copy or free an
- * FFI string, so the caller must consume it at once. Wiped with the key. */
+/* One reusable buffer, not a heap copy per call (MFL copies it and would never
+ * free a malloc'd one). Wiped with the key. */
 static char sh_key_out[sizeof sh_key];
 static char* sh_key_get(void) { mlock(sh_key_out, sizeof sh_key_out); memcpy(sh_key_out, sh_key, sizeof sh_key); return sh_key_out; }
 static long long sh_key_wipe(void) { explicit_bzero(sh_key, sizeof sh_key); explicit_bzero(sh_key_out, sizeof sh_key_out); return 0; }
@@ -55,9 +61,9 @@ static void sh_tty_onsig(int s) { sh_tty_sig = s; }
 
 static char* sh_tty_secret(const char* prompt) {
     int fd = open("/dev/tty", O_RDWR | O_CLOEXEC);
-    if (fd < 0) return sh_dup("");
+    if (fd < 0) return sh_give("");
     struct termios old, neu;
-    if (tcgetattr(fd, &old) != 0) { close(fd); return sh_dup(""); }
+    if (tcgetattr(fd, &old) != 0) { close(fd); return sh_give(""); }
     neu = old; neu.c_lflag &= ~(ECHO);
     struct sigaction sa, oi, ot;
     memset(&sa, 0, sizeof sa); sa.sa_handler = sh_tty_onsig;
@@ -71,8 +77,8 @@ static char* sh_tty_secret(const char* prompt) {
     if (write(fd, "\n", 1) < 0) {}
     close(fd);
     sigaction(SIGINT, &oi, 0); sigaction(SIGTERM, &ot, 0);
-    if (sh_tty_sig) { explicit_bzero(buf, sizeof buf); raise(sh_tty_sig); return sh_dup(""); }
-    char* out = sh_dup(buf);
+    if (sh_tty_sig) { explicit_bzero(buf, sizeof buf); raise(sh_tty_sig); return sh_give(""); }
+    char* out = sh_give(buf);
     explicit_bzero(buf, sizeof buf);
     return out;
 }
@@ -91,9 +97,9 @@ static char* sh_tty_value(const char* prompt) {
     char buf[8192]; ssize_t n = -1;
     sh_line_rc = 3;
     int fd = open("/dev/tty", O_RDWR | O_CLOEXEC);
-    if (fd < 0) return sh_dup("");
+    if (fd < 0) return sh_give("");
     struct termios old, neu;
-    if (tcgetattr(fd, &old) != 0) { close(fd); return sh_dup(""); }
+    if (tcgetattr(fd, &old) != 0) { close(fd); return sh_give(""); }
     neu = old; neu.c_lflag &= ~(ECHO);
     struct sigaction sa, oi, ot;
     memset(&sa, 0, sizeof sa); sa.sa_handler = sh_tty_onsig;
@@ -107,40 +113,50 @@ static char* sh_tty_value(const char* prompt) {
     if (write(fd, "\n", 1) < 0) {}
     close(fd);
     sigaction(SIGINT, &oi, 0); sigaction(SIGTERM, &ot, 0);
-    if (sh_tty_sig) { explicit_bzero(buf, sizeof buf); raise(sh_tty_sig); return sh_dup(""); }
-    if (n <= 0) return sh_dup("");
+    if (sh_tty_sig) { explicit_bzero(buf, sizeof buf); raise(sh_tty_sig); return sh_give(""); }
+    if (n <= 0) return sh_give("");
     if (n >= 4095) sh_line_rc = 1;                        /* the kernel caps a line here */
     else if (extra) sh_line_rc = 2;
     else sh_line_rc = 0;
     if (buf[n - 1] == '\n') n--;
     buf[n] = 0;
-    char* out = sh_dup(sh_line_rc ? "" : buf);
+    char* out = sh_give(sh_line_rc ? "" : buf);
     explicit_bzero(buf, sizeof buf);
     return out;
 }
 static long long sh_tty_value_status(void) { return sh_line_rc; }
 static long long sh_stdin_is_tty(void) { return isatty(0); }
 
-/* ---- desktop dialog (dialog.py, run by the system python; no shell).
+/* ---- desktop window: the sealed-dialog program (src/dialog.src), no shell.
  * status: 0 entered, 1 cancelled or timed out, 3 could not run, 4 too long or
- * multi-line. SEALED_DIALOG replaces the program (used by the tests); like the
- * environment in general, it is controlled by whoever runs sealed. */
-#include "dialog_py.h"
+ * multi-line. It is looked for next to this binary, never on PATH.
+ * SEALED_DIALOG replaces it (used by the tests); like the environment in
+ * general, that is controlled by whoever runs sealed. */
+static int sh_sibling(char* out, size_t cap) {
+    ssize_t n = readlink("/proc/self/exe", out, cap - 1);
+    if (n < 0) return -1;
+    out[n] = 0;
+    char* slash = strrchr(out, '/');
+    if (!slash || (size_t)(slash - out) + sizeof "/sealed-dialog" > cap) return -1;
+    strcpy(slash, "/sealed-dialog");
+    return 0;
+}
 static int sh_dialog_rc = 3;
 static char* sh_dialog(const char* title, const char* heading, const char* body, long long confirm) {
     static char buf[65536 + 2];
     sh_dialog_rc = 3;
     const char* other = getenv("SEALED_DIALOG");
-    char* av[10]; int n = 0;
+    char beside[4096];
+    char* av[8]; int n = 0;
     if (other && *other) av[n++] = (char*)other;
-    else { av[n++] = "/usr/bin/python3"; av[n++] = "-I"; av[n++] = "-c"; av[n++] = (char*)sh_dialog_py; }
+    else { if (sh_sibling(beside, sizeof beside)) return sh_give(""); av[n++] = beside; }
     av[n++] = (char*)title; av[n++] = (char*)heading; av[n++] = (char*)body;
     av[n++] = confirm ? "1" : "0";
     av[n] = 0;
     int p[2];
-    if (pipe(p)) return sh_dup("");
+    if (pipe(p)) return sh_give("");
     pid_t pid = fork();
-    if (pid < 0) { close(p[0]); close(p[1]); return sh_dup(""); }
+    if (pid < 0) { close(p[0]); close(p[1]); return sh_give(""); }
     if (pid == 0) {
         int nul = open("/dev/null", O_RDWR);
         dup2(nul, 0); dup2(p[1], 1); dup2(nul, 2);
@@ -166,7 +182,7 @@ static char* sh_dialog(const char* title, const char* heading, const char* body,
     if (code == 0) sh_dialog_rc = (too_long || len > 65535 || memchr(buf, '\n', len) || memchr(buf, 0, len)) ? 4 : 0;
     else if (code == 1) sh_dialog_rc = 1;
     else if (code == 4) sh_dialog_rc = 4;
-    char* out = sh_dup(sh_dialog_rc == 0 ? buf : "");
+    char* out = sh_give(sh_dialog_rc == 0 ? buf : "");
     explicit_bzero(buf, sizeof buf);
     return out;
 }
@@ -187,13 +203,13 @@ static char* sh_stdin_value(void) {
     static char buf[SH_MAX_VALUE + 2];
     size_t n = 0; ssize_t r;
     sh_stdin_rc = 0;
-    if (isatty(0)) { sh_stdin_rc = 3; return sh_dup(""); }
+    if (isatty(0)) { sh_stdin_rc = 3; return sh_give(""); }
     while (n <= SH_MAX_VALUE && (r = read(0, buf + n, SH_MAX_VALUE + 1 - n)) > 0) n += (size_t)r;
     if (n > SH_MAX_VALUE) sh_stdin_rc = 2;
     else if (memchr(buf, 0, n)) sh_stdin_rc = 1;
-    if (sh_stdin_rc) { explicit_bzero(buf, sizeof buf); return sh_dup(""); }
+    if (sh_stdin_rc) { explicit_bzero(buf, sizeof buf); return sh_give(""); }
     buf[n] = 0;
-    char* out = sh_dup(buf);
+    char* out = sh_give(buf);
     explicit_bzero(buf, sizeof buf);
     return out;
 }
@@ -224,11 +240,11 @@ static long long sh_private_dir(const char* path) {
 }
 static long long sh_chmod(const char* path, long long mode) { return chmod(path, (mode_t)mode); }
 
-/* ---- copy this binary (install), atomically ---- */
-static long long sh_install_self(const char* dst) {
+/* ---- copy a program (install), atomically ---- */
+static long long sh_copy_program(const char* src, const char* dst) {
     char tmp[4096];
     if ((size_t)snprintf(tmp, sizeof tmp, "%s.XXXXXX", dst) >= sizeof tmp) return -1;
-    int in = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
+    int in = open(src, O_RDONLY | O_CLOEXEC);
     if (in < 0) return -1;
     int out = mkstemp(tmp);
     if (out < 0) { close(in); return -1; }
@@ -241,8 +257,8 @@ static long long sh_install_self(const char* dst) {
 }
 static char* sh_self_path(void) {
     char b[4096]; ssize_t n = readlink("/proc/self/exe", b, sizeof b - 1);
-    if (n < 0) return sh_dup("");
-    b[n] = 0; return sh_dup(b);
+    if (n < 0) return sh_give("");
+    b[n] = 0; return sh_give(b);
 }
 
 /* ---- argv builder: no shell is ever involved ---- */

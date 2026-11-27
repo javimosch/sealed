@@ -1,6 +1,7 @@
 sealed
+sealed-dialog
 sealed.mfl
-src/dialog_py.h
+dialog.mfl
 *.db
 *.db-wal
 *.db-shm

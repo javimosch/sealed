@@ -35,7 +35,7 @@ checkbox, unchecked by default; only the person at the window can tick it.
 - never asks for your passphrase, and the window says not to type it;
 - one window at a time; cancel or 3 minutes without an answer stores nothing (give
   the command a timeout of at least 4 minutes);
-- needs a desktop session with GTK 3 and `python3-gi`. Otherwise it exits 93 and suggests
+- needs a desktop session and `sealed-dialog` (GTK 3) next to `sealed`. Otherwise it exits 93 and suggests
   `sealed put`. Multi-line values must come from a file.
 
 This keeps the value out of the chat, **not out of the agent's reach**: the same
@@ -89,10 +89,16 @@ accidental changes. Root can do all of this and read the daemon's memory.
 
 ## Try it
 
-Linux x86_64. Needs [machin](https://github.com/javimosch/machin) (tested with
-0.145.0), a C compiler, and the SQLite and OpenSSL 3 development packages. `curl`
-is needed for `update`. `request` and `unlock --dialog` need GTK 3 and
-`python3-gi` for `/usr/bin/python3`.
+Linux x86_64. Needs [machin](https://github.com/javimosch/machin) **0.146.0 or
+later** (`build.sh` checks), a C compiler, and the SQLite and OpenSSL 3
+development packages. `curl` is needed for `update`.
+
+`request` and `unlock --dialog` use a second program, `sealed-dialog`.
+`./build.sh` builds it when the GTK 3 development files are present
+(`libgtk-3-dev`) and skips it otherwise, or with `SEALED_NO_GUI=1`. `sealed`
+itself does not link GTK. It runs only the `sealed-dialog` in its own directory,
+never one found on `PATH`; `SEALED_DIALOG` replaces it. `sealed install` and
+`uninstall` handle both. `sealed update` replaces only `sealed`.
 
 ```sh
 ./scripts/demo.sh        # throwaway store, fake secret, includes the limit
@@ -146,13 +152,21 @@ The client refuses plain HTTP to a non-loopback daemon unless
 
 ## What this shows about machin
 
-The optional desktop window is **not MFL**: it is about 100 lines of Python/GTK
-([`src/dialog.py`](src/dialog.py)), embedded in the binary and run by the system
-Python.
-
-One program is both the CLI and the daemon: **about 1,600 lines of MFL and 400
+One program is both the CLI and the daemon: **about 1,700 lines of MFL and 400
 lines of C**. It compiles to a stripped binary of about 220 kB, dynamically linked
-to glibc, OpenSSL and SQLite, in under 3 seconds on the development machine.
+to glibc, OpenSSL and SQLite.
+
+**The desktop window is MFL too:** [`src/dialog.src`](src/dialog.src), about 200
+lines calling GTK 3 directly, with **no C file**. It builds to a second binary of
+about 23 kB that links GTK. Two things made that work:
+
+- **No FFI callbacks in machin yet**, so nothing is connected to a GTK signal. The
+  program runs the event loop itself and reads widget state every 20 ms. Buttons
+  are toggle buttons, so a click stays visible until it is read.
+- **What you type never becomes an MFL string.** `gtk_entry_get_text` is declared
+  as returning a `ptr`; C functions compare, scan and print GTK's own buffer. GTK
+  and the C library still handle the text, so this is not a guarantee that no copy
+  remains in memory.
 
 **From machin's built-ins:** Argon2id, AES-256-GCM, HKDF, HMAC, secure random
 bytes, SQLite, TCP sockets, an HTTP client, JSON, and arenas, which free each
@@ -160,17 +174,16 @@ daemon request's memory. The daemon has its own small HTTP server and handles on
 request at a time, so it shares no state between goroutines.
 
 **In C through the FFI** ([`src/shim.h`](src/shim.h)): hidden terminal input,
-running a command without a shell, streaming redaction, starting the desktop
-window, private temporary files,
+running a command without a shell, streaming redaction, starting the window
+program, private temporary files,
 locked memory and process hardening. This is the most security-sensitive code, so
 review it first.
 
-One thing to know if you write a shim: machin 0.145.0 does not copy a string
-returned by a C function, and does not free it. A static buffer is aliased by the
-next call, so either return a fresh heap copy (which stays until the process
-exits), or consume the buffer immediately. The shim does the latter for the master
-key. Working copies made inside MFL are released with the request's arena but are
-not zeroed, so `lock` does not guarantee that no trace remains in memory.
+If you write a shim: since machin 0.146.0 a `string` returned by a C function is
+copied, so returning `malloc`'d memory leaks it. This shim returns one reusable
+buffer and wipes it as soon as MFL has taken a sensitive value. Copies inside MFL
+are released with their arena but are not zeroed, so `lock` does not guarantee
+that no trace remains in memory.
 
 **Built for agents:** JSON output and typed errors with suggested next steps,
 following the [agent-first CLI specs](https://cli-specs.intrane.fr). With
@@ -199,7 +212,8 @@ mainly a demonstration of machin.
 
 ```sh
 ./build.sh && python3 tests/test_sealed.py    # real daemon, real pseudo-terminal
-xvfb-run -a /usr/bin/python3 tests/test_dialog.py    # real GTK window
+xvfb-run -a /usr/bin/python3 tests/test_dialog.py    # real window, simulated keys
+xvfb-run -a /usr/bin/python3 tests/test_window_e2e.py   # sealed + real window
 ```
 
 MIT license. See [SECURITY.md](SECURITY.md) to report a vulnerability.

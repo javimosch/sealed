@@ -363,7 +363,28 @@ sys.exit(a.get("rc", 0))
 
     rc, o, e = run("install", "--prefix", pre); check("install", rc == 0 and os.access(pre + "/sealed", os.X_OK), o + e)
     rc, o, e = run("install", "--prefix", pre); check("install idempotent", rc == 0, e)
-    rc, o, _ = run("uninstall", "--prefix", pre); check("uninstall", js(o)["removed"] is True, o)
+    has_window = os.path.exists(ROOT + "/sealed-dialog")
+    check("install places the window program", (js(o)["dialog"] == pre + "/sealed-dialog") == has_window and os.path.exists(pre + "/sealed-dialog") == has_window, o)
+
+    # where the window program is looked for: next to the binary, never on PATH
+    lone = tmp + "/lone"; os.mkdir(lone); shutil.copy2(BIN, lone + "/sealed")
+    trap = tmp + "/trap"; os.mkdir(trap)
+    def script(path, body):
+        open(path, "w").write("#!/bin/sh\n" + body + "\n"); os.chmod(path, 0o755)
+    script(trap + "/sealed-dialog", "touch " + tmp + "/path-was-used; exit 1")
+    def lone_request():
+        return subprocess.run([lone + "/sealed", "request", "lone/x"], env=dict(ENV, DISPLAY=":99", PATH=trap + ":" + ENV["PATH"]), capture_output=True, text=True, start_new_session=True, timeout=30)
+    run("daemon", "start"); human("unlock")
+    r = lone_request(); check("no window program beside sealed: exit 93, PATH not searched", r.returncode == 93 and not os.path.exists(tmp + "/path-was-used"), r.stderr)
+    script(lone + "/sealed-dialog", "printf %s found-beside-1234")
+    r = lone_request(); check("window program found beside sealed", r.returncode == 0, r.stderr)
+    # installing from a directory without one removes a stale copy
+    r = subprocess.run([lone + "/sealed", "install", "--prefix", tmp + "/p2"], env=ENV, capture_output=True, text=True, timeout=30)
+    os.remove(lone + "/sealed-dialog")
+    r = subprocess.run([lone + "/sealed", "install", "--prefix", tmp + "/p2"], env=ENV, capture_output=True, text=True, timeout=30)
+    check("stale window program removed on install", r.returncode == 0 and js(r.stdout)["dialog"] is None and not os.path.exists(tmp + "/p2/sealed-dialog"), r.stdout + r.stderr)
+    human("rm", "lone/x")
+    rc, o, _ = run("uninstall", "--prefix", pre); check("uninstall", js(o)["removed"] is True and not os.listdir(pre), (o, os.listdir(pre)))
     rc, o, _ = run("uninstall", "--prefix", pre); check("uninstall noop", rc == 0 and js(o)["removed"] is False, o)
 
     # ---- lock, restart, brute-force throttle ----
